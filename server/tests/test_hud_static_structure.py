@@ -17,3 +17,19 @@ def test_styles_css_exists_and_nonempty():
     css = HUD_DIR / "styles.css"
     assert css.exists()
     assert len(css.read_text()) > 100
+
+
+def test_index_html_has_no_inline_script_block():
+    html = (HUD_DIR / "index.html").read_text()
+    assert "<script>" not in html
+
+
+def test_index_html_links_external_script():
+    html = (HUD_DIR / "index.html").read_text()
+    assert '<script src="app.js">' in html
+
+
+def test_app_js_exists_and_nonempty():
+    js = HUD_DIR / "app.js"
+    assert js.exists()
+    assert len(js.read_text()) > 100
