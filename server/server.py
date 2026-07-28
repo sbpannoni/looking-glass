@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
+import asyncssh
 import requests
 import uvicorn
 import yaml
@@ -786,6 +787,23 @@ def _ws_allowed(ws: WebSocket) -> bool:
     return ws.cookies.get("jarvis_token") == token or ws.query_params.get("token") == token
 
 
+# ------------------------------------------------------------- Terminal panel
+
+TERMINAL_HOSTS: dict[str, dict[str, str]] = {
+    "snarf":          {"host": "192.168.1.239", "user": "sam"},
+    "r720":           {"host": "192.168.1.61",  "user": "sam"},
+    "octominer":      {"host": "192.168.1.50",  "user": "root"},
+    "beelink":        {"host": "192.168.1.158", "user": "root"},
+    "claude-control": {"host": "192.168.1.157", "user": "root"},
+    "hermes":         {"host": "192.168.1.159", "user": "root"},
+    "jarvis-hud":     {"host": "127.0.0.1",     "user": "root"},
+}
+
+
+def is_allowed_terminal_host(host: str) -> bool:
+    return host in TERMINAL_HOSTS
+
+
 # --------------------------------------------------------------- HUD + proxy
 
 HUD_DIR = ROOT / "hud"
@@ -1394,6 +1412,71 @@ def _maybe_schedule_partial(ws: WebSocket, pipeline: VoicePipelineServer, conn: 
             pass
 
     conn.partial_task = asyncio.create_task(run())
+
+
+TERMINAL_KEY_PATH = os.environ.get("JARVIS_TERMINAL_KEY", "/etc/jarvis/hud_terminal_key")
+
+
+@app.websocket("/ws/terminal/{host}")
+async def terminal_websocket(ws: WebSocket, host: str) -> None:
+    if not _ws_allowed(ws):
+        await ws.close(code=4401)
+        return
+    # This route grants real shell access (sam-level, sudo where the host
+    # already grants it) to the whole fleet. _ws_allowed() only enforces the
+    # token for callers that send an Origin header (browsers) and exempts
+    # non-browser clients entirely - fine for the voice endpoint's PTT/test
+    # clients, too permissive for something this sensitive. Require a
+    # correctly-presented token unconditionally, regardless of Origin.
+    token = hud_token()
+    supplied = ws.cookies.get("jarvis_token") or ws.query_params.get("token")
+    if not token or supplied != token:
+        await ws.close(code=4401)
+        return
+    if not is_allowed_terminal_host(host):
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    target = TERMINAL_HOSTS[host]
+
+    try:
+        async with asyncssh.connect(
+            target["host"],
+            username=target["user"],
+            client_keys=[TERMINAL_KEY_PATH],
+            # No known_hosts override: validates against the real ~/.ssh/known_hosts,
+            # already populated via StrictHostKeyChecking=accept-new during key
+            # deployment (see docs/superpowers/plans/... Task 8) - real host-key
+            # verification, not disabled.
+        ) as conn:
+            async with conn.create_process(term_type="xterm-256color") as process:
+
+                async def pump_output() -> None:
+                    try:
+                        while True:
+                            data = await process.stdout.read(4096)
+                            if not data:
+                                break
+                            await ws.send_text(data)
+                    except asyncssh.Error:
+                        pass
+
+                pump_task = asyncio.create_task(pump_output())
+                try:
+                    while True:
+                        msg = await ws.receive_text()
+                        process.stdin.write(msg)
+                except WebSocketDisconnect:
+                    pass
+                finally:
+                    pump_task.cancel()
+                    process.stdin.write_eof()
+    except (asyncssh.Error, OSError) as e:
+        try:
+            await ws.send_text(f"\r\n[connection error: {e}]\r\n")
+        except Exception:
+            pass
+        await ws.close(code=1011)
 
 
 @app.websocket("/ws")

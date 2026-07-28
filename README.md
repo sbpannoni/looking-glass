@@ -99,7 +99,7 @@ git clone https://github.com/YOURNAME/jarvis-hermes-hud
 cd jarvis-hermes-hud/server
 python3 -m venv .venv
 .venv/bin/pip install fastapi uvicorn requests pyyaml numpy anthropic \
-    RealtimeSTT faster-whisper silero-vad websockets psutil
+    RealtimeSTT faster-whisper silero-vad websockets psutil asyncssh
 cp config/server.example.yaml config/server.yaml   # edit: your ElevenLabs voice_id etc.
 scripts/make-certs.sh                              # self-signed TLS (browser mic needs it)
 scripts/make-boot-audio.sh YourName                # one-time boot greeting synthesis
