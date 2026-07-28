@@ -11,6 +11,8 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="vendor/xterm.css">
+<script src="vendor/xterm.js"></script>
 </head>
 <body>
 <div id="pinGate" style="display:none; position:fixed; inset:0; z-index:200; background:#020509f2;
@@ -113,6 +115,17 @@
     <div class="panel"><h2><span>AUTOMATIONS</span><span class="num">10</span></h2>
       <div id="jobsList"><div>—</div></div>
     </div>
+    <div class="panel"><h2><span>QUICK ACCESS</span><span class="num">11</span></h2>
+      <div class="terminal-tiles">
+        <button class="terminal-tile" data-host="snarf">snarf</button>
+        <button class="terminal-tile" data-host="r720">r720</button>
+        <button class="terminal-tile" data-host="octominer">octominer</button>
+        <button class="terminal-tile" data-host="beelink">beelink</button>
+        <button class="terminal-tile" data-host="claude-control">claude-control</button>
+        <button class="terminal-tile" data-host="hermes">hermes</button>
+        <button class="terminal-tile" data-host="jarvis-hud">jarvis-hud</button>
+      </div>
+    </div>
   </div>
 
   <div id="holoStage"></div>
@@ -127,6 +140,16 @@
         </div>
       </div>
       <iframe id="viewerIframe" src="about:blank" title="view"></iframe>
+    </div>
+  </div>
+
+  <div id="terminal-modal">
+    <div id="terminal-modal-box">
+      <div id="terminal-modal-bar">
+        <h3 id="terminal-modal-title"></h3>
+        <button class="btn danger" onclick="closeTerminal()">✕ CLOSE</button>
+      </div>
+      <div id="terminal-mount"></div>
     </div>
   </div>
 

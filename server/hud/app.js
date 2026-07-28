@@ -245,8 +245,39 @@ addEventListener("keydown",e=>{
   if(e.key!=="Escape")return;
   if(document.querySelector(".holo:not(.dismiss)"))dismissAllPanels();
   else if($("viewer").classList.contains("open"))closeView();
+  else if($("terminal-modal").classList.contains("open"))closeTerminal();
   else stopRun();
 });
+
+/* ---- SSH terminal panel ---- */
+let activeTerm=null, activeTermSocket=null;
+function openTerminal(host){
+  $("terminal-modal-title").textContent=host;
+  $("terminal-modal").classList.add("open");
+
+  const mount=$("terminal-mount");
+  mount.innerHTML="";
+  activeTerm=new Terminal({convertEol:true, fontSize:14});
+  activeTerm.open(mount);
+
+  const proto=location.protocol==="https:"?"wss:":"ws:";
+  activeTermSocket=new WebSocket(`${proto}//${location.host}/ws/terminal/${host}`);
+  activeTermSocket.onmessage=ev=>activeTerm.write(ev.data);
+  activeTermSocket.onclose=()=>{if(activeTerm)activeTerm.write("\r\n[connection closed]\r\n")};
+  activeTerm.onData(data=>{
+    if(activeTermSocket.readyState===WebSocket.OPEN)activeTermSocket.send(data);
+  });
+}
+function closeTerminal(){
+  $("terminal-modal").classList.remove("open");
+  if(activeTermSocket)activeTermSocket.close();
+  if(activeTerm)activeTerm.dispose();
+  activeTerm=null; activeTermSocket=null;
+}
+document.querySelectorAll(".terminal-tile").forEach(btn=>{
+  btn.addEventListener("click",()=>openTerminal(btn.dataset.host));
+});
+$("terminal-modal").addEventListener("click",e=>{if(e.target.id==="terminal-modal")closeTerminal()});
 addEventListener("keydown",e=>{
   if(e.code==="Space"&&document.activeElement!==$("chatInput")){e.preventDefault();toggleTalk()}
 });
