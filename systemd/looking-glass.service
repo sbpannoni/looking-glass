@@ -1,0 +1,16 @@
+[Unit]
+Description=Looking Glass HUD voice/visual command center
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/looking-glass/server
+EnvironmentFile=/etc/looking-glass/env
+ExecStart=/opt/looking-glass/server/.venv/bin/python server.py
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

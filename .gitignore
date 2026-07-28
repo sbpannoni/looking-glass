@@ -5,7 +5,7 @@ server/config/server.yaml
 server/certs/
 server/logs/
 server/hud/audio/
-server/hud/jarvis.cer
+server/hud/looking-glass.cer
 
 # worker local files
 worker/run-stt.bat

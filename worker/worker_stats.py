@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tiny stats agent for a GPU render/worker machine.
 
-Serves JSON at http://0.0.0.0:8767/stats for the Jarvis HUD machines panel.
+Serves JSON at http://0.0.0.0:8767/stats for the Looking Glass HUD machines panel.
 
 Setup on the worker (once):
     pip install psutil
@@ -42,7 +42,7 @@ def gpu_stats() -> dict:
 
 
 def stats() -> dict:
-    s = {"name": os.environ.get("JARVIS_WORKER_NAME", "GPU WORKER"), "online": True}
+    s = {"name": os.environ.get("LOOKING_GLASS_WORKER_NAME", "GPU WORKER"), "online": True}
     if psutil:
         s["cpu"] = psutil.cpu_percent(interval=0.2)
         s["mem"] = psutil.virtual_memory().percent
@@ -66,5 +66,5 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"Jarvis worker stats agent on http://0.0.0.0:{PORT}/stats")
+    print(f"Looking Glass worker stats agent on http://0.0.0.0:{PORT}/stats")
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

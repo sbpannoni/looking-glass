@@ -5,7 +5,7 @@ import asyncio, json, sys, wave
 import websockets
 
 WAV = sys.argv[1]
-CONV = sys.argv[2] if len(sys.argv) > 2 else "jarvis-debug"
+CONV = sys.argv[2] if len(sys.argv) > 2 else "looking-glass-debug"
 URL = "ws://127.0.0.1:8765/ws"
 
 
