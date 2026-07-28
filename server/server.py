@@ -786,6 +786,23 @@ def _ws_allowed(ws: WebSocket) -> bool:
     return ws.cookies.get("jarvis_token") == token or ws.query_params.get("token") == token
 
 
+# ------------------------------------------------------------- Terminal panel
+
+TERMINAL_HOSTS: dict[str, dict[str, str]] = {
+    "snarf":          {"host": "192.168.1.239", "user": "sam"},
+    "r720":           {"host": "192.168.1.61",  "user": "sam"},
+    "octominer":      {"host": "192.168.1.50",  "user": "root"},
+    "beelink":        {"host": "192.168.1.158", "user": "root"},
+    "claude-control": {"host": "192.168.1.157", "user": "root"},
+    "hermes":         {"host": "192.168.1.159", "user": "root"},
+    "jarvis-hud":     {"host": "127.0.0.1",     "user": "root"},
+}
+
+
+def is_allowed_terminal_host(host: str) -> bool:
+    return host in TERMINAL_HOSTS
+
+
 # --------------------------------------------------------------- HUD + proxy
 
 HUD_DIR = ROOT / "hud"
