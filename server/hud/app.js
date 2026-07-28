@@ -408,10 +408,22 @@ async function refreshUsage(){
     }
   }catch{}
 }
-refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();
+async function refreshProjects(){
+  try{
+    const r=await fetch("/api/projects"); const j=await r.json();
+    $("projectsList").innerHTML=(j.projects||[]).map(p=>{
+      if(p.error)return `<div class="kv"><span><span class="dot off"></span>${p.name}</span><b>${p.error}</b></div>`;
+      const pct=p.total?Math.round(p.done/p.total*100):0;
+      return `<div class="kv"><span>${p.name}</span><b>${p.done}/${p.total}</b></div>
+        <div class="bar"><i style="width:${pct}%"></i></div>`;
+    }).join("")||"<div class='kv'><span>no projects configured</span></div>";
+  }catch{ $("projectsList").innerHTML="<div class='kv'><span>unavailable</span></div>"; }
+}
+
+refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();refreshProjects();
 setInterval(refreshUsage,60000);
 setInterval(refreshHealth,15000); setInterval(refreshJobs,60000); setInterval(refreshMachines,10000);
-setInterval(refreshSkills,120000);
+setInterval(refreshSkills,120000); setInterval(refreshProjects,120000);
 
 /* ====================== holographic media panels ==================== */
 function holoWhoosh(up=true){
