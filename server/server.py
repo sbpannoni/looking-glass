@@ -1422,6 +1422,17 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
     if not _ws_allowed(ws):
         await ws.close(code=4401)
         return
+    # This route grants real shell access (sam-level, sudo where the host
+    # already grants it) to the whole fleet. _ws_allowed() only enforces the
+    # token for callers that send an Origin header (browsers) and exempts
+    # non-browser clients entirely - fine for the voice endpoint's PTT/test
+    # clients, too permissive for something this sensitive. Require a
+    # correctly-presented token unconditionally, regardless of Origin.
+    token = hud_token()
+    supplied = ws.cookies.get("jarvis_token") or ws.query_params.get("token")
+    if not token or supplied != token:
+        await ws.close(code=4401)
+        return
     if not is_allowed_terminal_host(host):
         await ws.close(code=4404)
         return
@@ -1433,7 +1444,10 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
             target["host"],
             username=target["user"],
             client_keys=[TERMINAL_KEY_PATH],
-            known_hosts=None,  # fixed LAN IPs, matches this fleet's existing trust model
+            # No known_hosts override: validates against the real ~/.ssh/known_hosts,
+            # already populated via StrictHostKeyChecking=accept-new during key
+            # deployment (see docs/superpowers/plans/... Task 8) - real host-key
+            # verification, not disabled.
         ) as conn:
             async with conn.create_process(term_type="xterm-256color") as process:
 
