@@ -227,57 +227,97 @@ $("talkBtn").onclick=toggleTalk;
 $("reactorWrap").onclick=toggleTalk;
 $("stopBtn").onclick=stopRun;
 
-/* ---- pop-up viewer ---- */
+/* ---- unified work-area tabs (terminals + views share one system) ---- */
 const DASH_PROXY=`https://${location.hostname}:9443`;
+const workTabs=new Map(); // id -> {type, title, term?, socket?, iframe?}
+
+function tabId(type,key){return `${type}:${key}`}
+
+function updateWorkAreaVisibility(){
+  $("work-area").classList.toggle("has-tabs",workTabs.size>0);
+}
+
+function activateWorkTab(id){
+  document.querySelectorAll(".work-tab").forEach(b=>b.classList.toggle("active",b.dataset.tabId===id));
+  document.querySelectorAll(".work-panel").forEach(p=>p.classList.toggle("active",p.dataset.tabId===id));
+}
+
+function closeWorkTab(id){
+  const tab=workTabs.get(id);
+  if(!tab)return;
+  if(tab.socket)tab.socket.close();
+  if(tab.term)tab.term.dispose();
+  document.querySelector(`.work-tab[data-tab-id="${id}"]`)?.remove();
+  document.querySelector(`.work-panel[data-tab-id="${id}"]`)?.remove();
+  workTabs.delete(id);
+  const remaining=[...workTabs.keys()];
+  if(remaining.length)activateWorkTab(remaining[remaining.length-1]);
+  updateWorkAreaVisibility();
+}
+
+function openWorkTab(type,key,title,buildContent){
+  const id=tabId(type,key);
+  if(workTabs.has(id)){activateWorkTab(id);return workTabs.get(id)}
+
+  const tabBtn=document.createElement("div");
+  tabBtn.className="work-tab"; tabBtn.dataset.tabId=id;
+  const label=document.createElement("span"); label.textContent=title;
+  const close=document.createElement("span"); close.className="work-tab-close"; close.textContent="✕";
+  label.onclick=()=>activateWorkTab(id);
+  close.onclick=e=>{e.stopPropagation();closeWorkTab(id)};
+  tabBtn.append(label,close);
+  $("work-tabs").appendChild(tabBtn);
+
+  const panel=document.createElement("div");
+  panel.className="work-panel"; panel.dataset.tabId=id;
+  $("work-content").appendChild(panel);
+
+  const tab={type,title};
+  workTabs.set(id,tab);
+
+  // Activate + reveal the work-area BEFORE building content: xterm.js measures
+  // its container's size at Terminal.open() time, so the panel must already
+  // be display:block, or it sizes to zero. No CSS transition on #work-area's
+  // reveal (deliberately - see styles.css), so this is a plain synchronous
+  // show/hide with no animation to race against.
+  activateWorkTab(id);
+  updateWorkAreaVisibility();
+  buildContent(panel,tab);
+  return tab;
+}
+
 function openView(name,path){
-  $("viewerTitle").textContent=name;
-  $("viewerIframe").src=DASH_PROXY+path;
-  $("viewer").classList.add("open");
-}
-function closeView(){
-  $("viewer").classList.remove("open");
-  $("viewerIframe").src="about:blank";
-}
-$("viewerClose").onclick=closeView;
-$("viewerPop").onclick=()=>{window.open($("viewerIframe").src,"_blank");closeView()};
-$("viewer").addEventListener("click",e=>{if(e.target.id==="viewer")closeView()});
-addEventListener("keydown",e=>{
-  if(e.key!=="Escape")return;
-  if(document.querySelector(".holo:not(.dismiss)"))dismissAllPanels();
-  else if($("viewer").classList.contains("open"))closeView();
-  else if($("terminal-modal").classList.contains("open"))closeTerminal();
-  else stopRun();
-});
-
-/* ---- SSH terminal panel ---- */
-let activeTerm=null, activeTermSocket=null;
-function openTerminal(host){
-  $("terminal-modal-title").textContent=host;
-  $("terminal-modal").classList.add("open");
-
-  const mount=$("terminal-mount");
-  mount.innerHTML="";
-  activeTerm=new Terminal({convertEol:true, fontSize:14});
-  activeTerm.open(mount);
-
-  const proto=location.protocol==="https:"?"wss:":"ws:";
-  activeTermSocket=new WebSocket(`${proto}//${location.host}/ws/terminal/${host}`);
-  activeTermSocket.onmessage=ev=>activeTerm.write(ev.data);
-  activeTermSocket.onclose=()=>{if(activeTerm)activeTerm.write("\r\n[connection closed]\r\n")};
-  activeTerm.onData(data=>{
-    if(activeTermSocket.readyState===WebSocket.OPEN)activeTermSocket.send(data);
+  openWorkTab("view",path,name,(panel)=>{
+    const iframe=document.createElement("iframe");
+    iframe.className="work-view-iframe";
+    iframe.src=DASH_PROXY+path;
+    iframe.title=name;
+    panel.appendChild(iframe);
   });
 }
-function closeTerminal(){
-  $("terminal-modal").classList.remove("open");
-  if(activeTermSocket)activeTermSocket.close();
-  if(activeTerm)activeTerm.dispose();
-  activeTerm=null; activeTermSocket=null;
+
+function openTerminal(host){
+  openWorkTab("terminal",host,host,(panel,tab)=>{
+    const term=new Terminal({convertEol:true, fontSize:13});
+    term.open(panel);
+    const proto=location.protocol==="https:"?"wss:":"ws:";
+    const socket=new WebSocket(`${proto}//${location.host}/ws/terminal/${host}`);
+    socket.onmessage=ev=>term.write(ev.data);
+    socket.onclose=()=>term.write("\r\n[connection closed]\r\n");
+    term.onData(data=>{if(socket.readyState===WebSocket.OPEN)socket.send(data)});
+    tab.term=term; tab.socket=socket;
+  });
 }
+
 document.querySelectorAll(".terminal-tile").forEach(btn=>{
   btn.addEventListener("click",()=>openTerminal(btn.dataset.host));
 });
-$("terminal-modal").addEventListener("click",e=>{if(e.target.id==="terminal-modal")closeTerminal()});
+
+addEventListener("keydown",e=>{
+  if(e.key!=="Escape")return;
+  if(document.querySelector(".holo:not(.dismiss)"))dismissAllPanels();
+  else stopRun();
+});
 addEventListener("keydown",e=>{
   if(e.code==="Space"&&document.activeElement!==$("chatInput")){e.preventDefault();toggleTalk()}
 });
