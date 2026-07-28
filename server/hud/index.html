@@ -77,6 +77,10 @@
       <div id="status-indicator" class="status-dot"></div>
       <div id="coreState"><div class="st" id="stateLabel">STANDBY</div><div class="hint" id="stateHint">CLICK RING OR SPACE TO TALK</div></div>
     </div>
+    <div id="work-area">
+      <div id="work-tabs"></div>
+      <div id="work-content"></div>
+    </div>
     <div id="feed"></div>
     <div id="chatRow">
       <input id="chatInput" placeholder="Type to Hermes… (/new resets · voice: click the ring)" autocomplete="off">
@@ -129,29 +133,6 @@
   </div>
 
   <div id="holoStage"></div>
-
-  <div id="viewer">
-    <div id="viewerBox">
-      <div id="viewerBar">
-        <h3 id="viewerTitle">KANBAN</h3>
-        <div class="vbtns">
-          <button class="btn" id="viewerPop">OPEN TAB</button>
-          <button class="btn danger" id="viewerClose">✕ CLOSE</button>
-        </div>
-      </div>
-      <iframe id="viewerIframe" src="about:blank" title="view"></iframe>
-    </div>
-  </div>
-
-  <div id="terminal-modal">
-    <div id="terminal-modal-box">
-      <div id="terminal-modal-bar">
-        <h3 id="terminal-modal-title"></h3>
-        <button class="btn danger" onclick="closeTerminal()">✕ CLOSE</button>
-      </div>
-      <div id="terminal-mount"></div>
-    </div>
-  </div>
 
   <footer>
     <span></span>
