@@ -1127,6 +1127,79 @@ async def rack_health() -> JSONResponse:
     return JSONResponse(data)
 
 
+TRACKED_PROJECTS = [
+    {"name": "my-website", "repo": "sbpannoni/my-website", "ref": "main", "path": "TODO.md", "parser": "checkbox"},
+    {"name": "DARKHELIX", "repo": "sbpannoni/DARKHELIX", "ref": "master", "path": "TODO.md", "parser": "checkbox"},
+    {"name": "redqueen-website", "repo": "sbpannoni/redqueen-website", "ref": "main", "path": "TODO.md", "parser": "checkbox"},
+    {"name": "server", "repo": "sbpannoni/snarf", "ref": "main", "path": "STATUS.md", "parser": "status_table"},
+]
+_STATUS_EMOJI = {"✅": "done", "🔄": "in_progress", "🚧": "blocked", "📋": "todo"}
+PROJECTS_CACHE: dict = {"ts": 0.0, "data": {}}
+
+
+def _parse_checkbox_md(text: str) -> dict:
+    done = len(re.findall(r"^\s*-\s*\[[xX]\]", text, re.MULTILINE))
+    open_ = len(re.findall(r"^\s*-\s*\[ \]", text, re.MULTILINE))
+    return {"done": done, "open": open_, "total": done + open_}
+
+
+def _parse_status_table_md(text: str) -> dict:
+    counts = {"done": 0, "in_progress": 0, "blocked": 0, "todo": 0}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("|") or not line.endswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if not cells or all(set(c) <= set("-: ") for c in cells):
+            continue  # separator row (e.g. |---|---|)
+        for cell in cells:
+            if cell in _STATUS_EMOJI:
+                counts[_STATUS_EMOJI[cell]] += 1
+                break
+    total = sum(counts.values())
+    return {**counts, "total": total, "done": counts["done"], "open": total - counts["done"]}
+
+
+def _fetch_github_file(repo: str, ref: str, path: str) -> str | None:
+    token = os.environ.get("GITHUB_TODO_TOKEN")
+    if not token:
+        return None
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github.raw+json"}
+    url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={ref}"
+    try:
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return None
+        return resp.text
+    except requests.RequestException:
+        return None
+
+
+@app.get("/api/projects")
+async def api_projects() -> JSONResponse:
+    """Per-project TODO/status counts, fetched from each tracked repo's
+    TODO.md (checkbox syntax) or, for the server repo, STATUS.md's own
+    emoji-status table format."""
+    now = time.time()
+    if now - PROJECTS_CACHE["ts"] < 60:
+        return JSONResponse(PROJECTS_CACHE["data"])
+
+    def fetch_all() -> dict:
+        results = []
+        for proj in TRACKED_PROJECTS:
+            content = _fetch_github_file(proj["repo"], proj["ref"], proj["path"])
+            if content is None:
+                results.append({"name": proj["name"], "error": "unreachable"})
+                continue
+            parser = _parse_checkbox_md if proj["parser"] == "checkbox" else _parse_status_table_md
+            results.append({"name": proj["name"], **parser(content)})
+        return {"projects": results}
+
+    data = await asyncio.to_thread(fetch_all)
+    PROJECTS_CACHE.update(ts=now, data=data)
+    return JSONResponse(data)
+
+
 ACTIVITY_LOG: list[dict] = []
 ACTIVITY_LOG_MAX = 200
 
