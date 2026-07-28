@@ -1,4 +1,26 @@
 "use strict";
+/* ============================== theme ============================== */
+const THEME_KEY = "jarvis-theme";
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute("data-theme") ||
+    (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const next = current === "dark" ? "light" : "dark";
+  applyTheme(next);
+  localStorage.setItem(THEME_KEY, next);
+}
+
+(function initTheme() {
+  const stored = localStorage.getItem(THEME_KEY);
+  if (stored === "dark" || stored === "light") {
+    applyTheme(stored);
+  }
+})();
+
 /* ============================== state ============================== */
 const CONV = "jarvis-main";
 let ws=null, wsReady=false, capturing=false, state="standby";
