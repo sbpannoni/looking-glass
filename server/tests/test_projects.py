@@ -59,13 +59,13 @@ client = TestClient(srv.app)
 
 
 def test_api_projects_requires_auth(monkeypatch):
-    monkeypatch.setenv("JARVIS_HUD_TOKEN", "test-token")
+    monkeypatch.setenv("LOOKING_GLASS_HUD_TOKEN", "test-token")
     resp = client.get("/api/projects")
     assert resp.status_code == 401
 
 
 def test_api_projects_returns_error_entries_without_github_token(monkeypatch):
-    monkeypatch.delenv("JARVIS_HUD_TOKEN", raising=False)
+    monkeypatch.delenv("LOOKING_GLASS_HUD_TOKEN", raising=False)
     monkeypatch.delenv("GITHUB_TODO_TOKEN", raising=False)
     srv.PROJECTS_CACHE.update(ts=0.0, data={})  # bust the cache for a clean test
     resp = client.get("/api/projects")

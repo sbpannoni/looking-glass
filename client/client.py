@@ -35,7 +35,12 @@ DTYPE = "int16"
 CHUNK_MS = 80
 CHUNK_FRAMES = int(SAMPLE_RATE * CHUNK_MS / 1000)
 DEFAULT_SERVER = "ws://YOUR_SERVER_IP:8765/ws"
-DEFAULT_WAKE_WORD = "hey_jarvis"
+DEFAULT_WAKE_WORD = "hey_jarvis"  # openWakeWord stock model name — a real,
+# fixed pretrained model shipped by the library, not our own branding; there
+# is no "hey_looking_glass" model, so this can't be renamed without breaking
+# wake-word detection. If a custom wake word matters, train one via
+# openWakeWord's own tooling rather than assuming a differently-named stock
+# model exists.
 
 
 @dataclass

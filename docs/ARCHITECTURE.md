@@ -30,7 +30,7 @@ tool events, and approval events in one stream.
 Client → server (JSON + binary):
 
 ```
-{"type":"start","sample_rate":16000,"format":"pcm_s16le","channels":1,"conversation":"jarvis-main"?}
+{"type":"start","sample_rate":16000,"format":"pcm_s16le","channels":1,"conversation":"looking-glass-main"?}
 <binary int16 PCM chunks>
 {"type":"stop"}
 {"type":"stop_run"}
@@ -64,7 +64,7 @@ approval_request{data,run_id} · error · done{timing}
 
 ## Auth model
 
-`JARVIS_HUD_TOKEN` (env) gates `/api/*`, the dashboard proxy, and
+`LOOKING_GLASS_HUD_TOKEN` (env) gates `/api/*`, the dashboard proxy, and
 browser-originated WebSockets (Origin allowlist + cookie). Native clients (the
 PTT client, test scripts) send no Origin header and are exempt — the
 threat model is a malicious *website* doing cross-origin requests against your
@@ -105,7 +105,7 @@ behind Hermes; the second is the Whisper model size.
     listen socket — the next spawn then fails its first bind and uvicorn's
     SystemExit cancels ALL listeners. Stop by PORT ownership
     (`lsof -ti tcp:PORT -sTCP:LISTEN | xargs kill -9`) — shipped in
-    `scripts/jarvis-stop.sh`.
+    `scripts/looking-glass-stop.sh`.
 11. **Agent tool-choice**: SOUL.md prose cannot redirect the model away from
     attractive built-in tools (it kept "showing" videos in its own invisible
     browser); a first-class plugin tool with an explicit schema wins

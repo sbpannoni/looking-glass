@@ -1,6 +1,6 @@
 #!/bin/bash
 U=gui/$(id -u)
-for s in com.jarvis.voice com.jarvis.dashboard; do launchctl bootout $U/$s 2>/dev/null; done
+for s in com.looking-glass.voice com.looking-glass.dashboard; do launchctl bootout $U/$s 2>/dev/null; done
 sleep 2
 # kill anything still holding our ports (catches orphaned STT children whose
 # cmdline doesn't contain "server.py")

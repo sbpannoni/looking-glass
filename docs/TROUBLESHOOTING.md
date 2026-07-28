@@ -5,7 +5,7 @@ Browsers require a secure context for `getUserMedia`. Trust `certs/cert.pem`
 on the device (see SETUP §3) and use `https://`.
 
 **First connection after server start times out** — the Whisper model warms at
-startup (~40 s). `scripts/jarvis-health.sh` until all rows are OK.
+startup (~40 s). `scripts/looking-glass-health.sh` until all rows are OK.
 
 **"Agent backend offline. Running in basic mode."** — the Hermes API server
 isn't reachable. Check `API_SERVER_ENABLED/KEY` in `~/.hermes/.env` and that
@@ -20,7 +20,7 @@ http://127.0.0.1:8642/health`.
 current code forces UTF-8 on the Hermes SSE stream.
 
 **401 everywhere / ACCESS CODE loop** — the token you entered doesn't match
-`JARVIS_HUD_TOKEN` in `~/.hermes/.env`. Clear the `jarvis_token` cookie and
+`LOOKING_GLASS_HUD_TOKEN` in `~/.hermes/.env`. Clear the `looking_glass_token` cookie and
 retry; restart the voice server after changing the env var.
 
 **LaunchAgent exits with EX_CONFIG** — your log paths point at an external
@@ -53,18 +53,18 @@ resolves them via `sys.prefix`) and install `nvidia-cublas-cu12
 nvidia-cudnn-cu12` into the same venv.
 
 **HUD unreachable for ~15 s after a restart** — normal: launchd's respawn
-throttle. If it lasts longer, run `scripts/jarvis-health.sh` on the host.
+throttle. If it lasts longer, run `scripts/looking-glass-health.sh` on the host.
 
 **HTTPS dead but the plain ws port still answers** — two known causes, both
 fixed in current files but worth knowing: (1) file-descriptor exhaustion
 (launchd default is 256; the shipped plist raises it to 8192), and (2) an
 orphaned STT child process holding a port from a previous run, which makes the
 next spawn fail its first bind and silently cancel all the TLS listeners. Use
-`scripts/jarvis-stop.sh` — it kills by port ownership — never a bare pkill.
+`scripts/looking-glass-stop.sh` — it kills by port ownership — never a bare pkill.
 
 **Slow page loads from Windows (10s+), instant by IP** — Windows mDNS is
 flaky with `.local` names. Add a hosts-file entry (admin):
-`<server-ip> jarvis.local jarvis` (give the server a DHCP reservation first).
+`<server-ip> looking-glass.local looking-glass` (give the server a DHCP reservation first).
 
 **Agent replies are empty (content null, 0 input tokens)** — your LLM
 provider is out of quota/credits, not a bug here. Check the Hermes gateway
@@ -75,6 +75,6 @@ config.yaml.
 enable the bundled `hermes-plugin/hud_display` (see SETUP). Prose
 instructions don't beat tool schemas; the plugin does.
 
-**Phone can't reach jarvis.local** — some Android versions lack mDNS; use the
+**Phone can't reach looking-glass.local** — some Android versions lack mDNS; use the
 raw IP (and add it to `security.extra_origin_hosts` in server.yaml so the
 WebSocket origin check accepts it).

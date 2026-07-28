@@ -1,4 +1,4 @@
-# J.A.R.V.I.S — Voice + HUD for Hermes Agent
+# LOOKING GLASS — Voice + HUD for Hermes Agent
 
 A self-hosted, Iron-Man-style voice assistant and command center built on top of
 [Hermes Agent](https://github.com/NousResearch/hermes-agent) (NousResearch's
@@ -12,7 +12,7 @@ local (Whisper on CPU).
 
 ## Demo
 
-[![Watch the J.A.R.V.I.S demo](https://img.youtube.com/vi/YNI9pm3h6x8/hqdefault.jpg)](https://youtu.be/YNI9pm3h6x8)
+[![Watch the LOOKING GLASS demo](https://img.youtube.com/vi/YNI9pm3h6x8/hqdefault.jpg)](https://youtu.be/YNI9pm3h6x8)
 
 ▶ **[Watch the demo on YouTube](https://youtu.be/YNI9pm3h6x8)** — live transcription, agent tool calls, holographic media panels, and the cinematic boot, all in real time.
 
@@ -49,7 +49,7 @@ The HUD around the ring is a real control center:
   the included sidecar and transcription jumps to `large-v3-turbo` at ~0.2 s,
   with automatic fallback to local Whisper when that machine is off
 - **Mobile-ready** — responsive layout + Add to Home Screen = full-screen
-  Jarvis app on your phone
+  Looking Glass app on your phone
 
 ## Architecture
 
@@ -89,14 +89,14 @@ Full walkthrough in [docs/SETUP.md](docs/SETUP.md). Short version:
 cat >> ~/.hermes/.env <<EOF
 API_SERVER_ENABLED=true
 API_SERVER_KEY=$(python3 -c 'import secrets;print(secrets.token_urlsafe(32))')
-JARVIS_HUD_TOKEN=$(python3 -c 'import secrets;print("jarvis-"+secrets.token_hex(3))')
+LOOKING_GLASS_HUD_TOKEN=$(python3 -c 'import secrets;print("looking-glass-"+secrets.token_hex(3))')
 ELEVENLABS_API_KEY=your-key-here
 EOF
 hermes gateway   # or set up its LaunchAgent / service
 
 # 2. This repo
-git clone https://github.com/YOURNAME/jarvis-hermes-hud
-cd jarvis-hermes-hud/server
+git clone https://github.com/YOURNAME/looking-glass-hud
+cd looking-glass-hud/server
 python3 -m venv .venv
 .venv/bin/pip install fastapi uvicorn requests pyyaml numpy anthropic \
     RealtimeSTT faster-whisper silero-vad websockets psutil asyncssh
@@ -106,7 +106,7 @@ scripts/make-boot-audio.sh YourName                # one-time boot greeting synt
 
 # 3. Run
 .venv/bin/python server.py
-# open https://YOUR_HOST/hud/ → accept cert → enter your JARVIS_HUD_TOKEN → talk
+# open https://YOUR_HOST/hud/ → accept cert → enter your LOOKING_GLASS_HUD_TOKEN → talk
 ```
 
 For auto-start on boot, see [launchd/](launchd/) (macOS) — the plists document
@@ -157,4 +157,4 @@ STT by [faster-whisper](https://github.com/SYSTRAN/faster-whisper) /
 [RealtimeSTT](https://github.com/KoljaB/RealtimeSTT). Voice by
 [ElevenLabs](https://elevenlabs.io).
 
-MIT — see [LICENSE](LICENSE). Use it, fork it, build your own Jarvis.
+MIT — see [LICENSE](LICENSE). Use it, fork it, build your own Looking Glass.

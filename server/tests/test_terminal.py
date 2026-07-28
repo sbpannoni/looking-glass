@@ -6,7 +6,7 @@ import server as srv  # noqa: E402
 
 
 def test_all_seven_fleet_hosts_are_allowed():
-    for name in ("snarf", "r720", "octominer", "beelink", "claude-control", "hermes", "jarvis-hud"):
+    for name in ("snarf", "r720", "octominer", "beelink", "claude-control", "hermes", "looking-glass"):
         assert srv.is_allowed_terminal_host(name), f"{name} should be allowed"
 
 
@@ -32,11 +32,11 @@ TEST_TOKEN = "test-terminal-token"
 
 @pytest.fixture
 def with_hud_token(monkeypatch):
-    monkeypatch.setenv("JARVIS_HUD_TOKEN", TEST_TOKEN)
+    monkeypatch.setenv("LOOKING_GLASS_HUD_TOKEN", TEST_TOKEN)
 
 
 def test_terminal_ws_rejects_when_no_token_configured(monkeypatch):
-    monkeypatch.delenv("JARVIS_HUD_TOKEN", raising=False)
+    monkeypatch.delenv("LOOKING_GLASS_HUD_TOKEN", raising=False)
     with pytest.raises(WebSocketDisconnect) as exc_info:
         with client.websocket_connect("/ws/terminal/snarf"):
             pass
@@ -70,7 +70,7 @@ def test_terminal_ws_rejects_unknown_host(with_hud_token):
 
 
 def test_terminal_ws_rejects_disallowed_origin(with_hud_token, monkeypatch):
-    monkeypatch.setattr(srv, "ALLOWED_ORIGIN_HOSTS", {"jarvis.local"})
+    monkeypatch.setattr(srv, "ALLOWED_ORIGIN_HOSTS", {"looking-glass.local"})
     with pytest.raises(WebSocketDisconnect) as exc_info:
         with client.websocket_connect(
             f"/ws/terminal/snarf?token={TEST_TOKEN}", headers={"origin": "https://evil.example"}

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!-- Edit the two /PATH/TO placeholders, copy to ~/Library/LaunchAgents/, then:
-     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.jarvis.voice.plist
+     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.looking-glass.voice.plist
 
      IMPORTANT (macOS quirks discovered the hard way):
      1. Invoke the VENV python directly (not bash -c 'cd ...', not the bare
@@ -15,7 +15,7 @@
         server idles at ~244 open files (Python libs + the Whisper model) —
         without these keys it dies with "Too many open files" within hours. -->
 <plist version="1.0"><dict>
-  <key>Label</key><string>com.jarvis.voice</string>
+  <key>Label</key><string>com.looking-glass.voice</string>
   <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>8192</integer></dict>
   <key>HardResourceLimits</key><dict><key>NumberOfFiles</key><integer>8192</integer></dict>
   <key>ProgramArguments</key><array>
@@ -24,8 +24,8 @@
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/Users/YOUR_USER/Library/Logs/jarvis-voice.log</string>
-  <key>StandardErrorPath</key><string>/Users/YOUR_USER/Library/Logs/jarvis-voice.log</string>
+  <key>StandardOutPath</key><string>/Users/YOUR_USER/Library/Logs/looking-glass-voice.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOUR_USER/Library/Logs/looking-glass-voice.log</string>
   <key>EnvironmentVariables</key><dict>
     <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>

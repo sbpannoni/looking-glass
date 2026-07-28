@@ -1,6 +1,6 @@
 "use strict";
 /* ============================== theme ============================== */
-const THEME_KEY = "jarvis-theme";
+const THEME_KEY = "looking-glass-theme";
 
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
@@ -22,7 +22,7 @@ function toggleTheme() {
 })();
 
 /* ============================== state ============================== */
-const CONV = "jarvis-main";
+const CONV = "looking-glass-main";
 let ws=null, wsReady=false, capturing=false, state="standby";
 let audioCtx=null, workletNode=null, mediaStream=null, srcNode=null;
 let playhead=0, activeSources=[], leftoverByte=null, audioArrived=false;
@@ -122,7 +122,7 @@ function connect(){
       if(tm.end_of_speech_to_first_audio_seconds!=null)$("mFirst").textContent=tm.end_of_speech_to_first_audio_seconds+"s";
       if(tm.total_turn_seconds!=null)$("mTotal").textContent=tm.total_turn_seconds+"s";
       $("mBrain").textContent=tm.llm_provider||"—";
-      if(tm.response_text)addMsg("jarvis",tm.response_text);
+      if(tm.response_text)addMsg("looking-glass",tm.response_text);
       setTimeout(()=>{if(state!=="listening")setState("standby","STANDBY")},400);
     }
   };
@@ -332,7 +332,7 @@ async function sendChat(){
     const j=await r.json();
     if(!r.ok)throw new Error(j.error||r.status);
     (j.tools||[]).forEach(t=>addActivity("",t.name,t.preview));
-    addMsg("jarvis",j.text||"(no reply)");
+    addMsg("looking-glass",j.text||"(no reply)");
     if(/^\/(new|reset|clear)\b/i.test(text)){     // slash reset → also clear the visible feed
       setTimeout(()=>{feed.innerHTML="";addMsg("sys","conversation reset");},800);
     }
@@ -527,7 +527,7 @@ function showPinGate(){
 }
 $("pinBtn").onclick=async()=>{
   const v=$("pinInput").value.trim(); if(!v)return;
-  document.cookie=`jarvis_token=${encodeURIComponent(v)}; path=/; max-age=31536000; secure; samesite=lax`;
+  document.cookie=`looking_glass_token=${encodeURIComponent(v)}; path=/; max-age=31536000; secure; samesite=lax`;
   const r=await fetch("/api/usage");
   if(r.status===401){$("pinMsg").textContent="ACCESS DENIED";$("pinInput").value="";return}
   location.reload();
@@ -576,4 +576,4 @@ addEventListener("keydown",e=>{
 });
 bootSequence(new URLSearchParams(location.search).get("boot")==="full");
 
-addMsg("sys","Jarvis HUD online. Click the ring or press Space to talk.");
+addMsg("sys","Looking Glass HUD online. Click the ring or press Space to talk.");
