@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Iterator
 
+import asyncssh
 import requests
 import uvicorn
 import yaml
@@ -1413,6 +1414,9 @@ def _maybe_schedule_partial(ws: WebSocket, pipeline: VoicePipelineServer, conn: 
     conn.partial_task = asyncio.create_task(run())
 
 
+TERMINAL_KEY_PATH = os.environ.get("JARVIS_TERMINAL_KEY", "/etc/jarvis/hud_terminal_key")
+
+
 @app.websocket("/ws/terminal/{host}")
 async def terminal_websocket(ws: WebSocket, host: str) -> None:
     if not _ws_allowed(ws):
@@ -1422,8 +1426,43 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
         await ws.close(code=4404)
         return
     await ws.accept()
-    # SSH proxy body added in Task 10
-    await ws.close(code=1000)
+    target = TERMINAL_HOSTS[host]
+
+    try:
+        async with asyncssh.connect(
+            target["host"],
+            username=target["user"],
+            client_keys=[TERMINAL_KEY_PATH],
+            known_hosts=None,  # fixed LAN IPs, matches this fleet's existing trust model
+        ) as conn:
+            async with conn.create_process(term_type="xterm-256color") as process:
+
+                async def pump_output() -> None:
+                    try:
+                        while True:
+                            data = await process.stdout.read(4096)
+                            if not data:
+                                break
+                            await ws.send_text(data)
+                    except asyncssh.Error:
+                        pass
+
+                pump_task = asyncio.create_task(pump_output())
+                try:
+                    while True:
+                        msg = await ws.receive_text()
+                        process.stdin.write(msg)
+                except WebSocketDisconnect:
+                    pass
+                finally:
+                    pump_task.cancel()
+                    process.stdin.write_eof()
+    except (asyncssh.Error, OSError) as e:
+        try:
+            await ws.send_text(f"\r\n[connection error: {e}]\r\n")
+        except Exception:
+            pass
+        await ws.close(code=1011)
 
 
 @app.websocket("/ws")

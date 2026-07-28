@@ -23,22 +23,39 @@ def test_terminal_hosts_have_required_fields():
 
 
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+import pytest
 
 client = TestClient(srv.app)
 
 
 def test_terminal_ws_rejects_unknown_host():
-    with client.websocket_connect("/ws/terminal/not-a-real-host") as ws:
-        data = ws.receive()
-        assert data["type"] == "websocket.close"
-        assert data["code"] == 4404
+    # server closes before ever accepting -> TestClient raises on __enter__,
+    # not something read via a subsequent .receive() call
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect("/ws/terminal/not-a-real-host"):
+            pass
+    assert exc_info.value.code == 4404
 
 
 def test_terminal_ws_rejects_disallowed_origin(monkeypatch):
     monkeypatch.setattr(srv, "ALLOWED_ORIGIN_HOSTS", {"jarvis.local"})
-    with client.websocket_connect(
-        "/ws/terminal/snarf", headers={"origin": "https://evil.example"}
-    ) as ws:
-        data = ws.receive()
-        assert data["type"] == "websocket.close"
-        assert data["code"] == 4401
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            "/ws/terminal/snarf", headers={"origin": "https://evil.example"}
+        ):
+            pass
+    assert exc_info.value.code == 4401
+
+
+def test_terminal_ws_runs_a_real_command_on_snarf():
+    """Live integration test — requires Task 8's key deployment to be done
+    and snarf reachable. Not mocked: proves the real SSH path works."""
+    with client.websocket_connect("/ws/terminal/snarf") as ws:
+        ws.send_text("hostname\n")
+        output = ""
+        for _ in range(20):  # accumulate a few frames, PTY output can be chunked
+            output += ws.receive_text()
+            if "snarf" in output:
+                break
+        assert "snarf" in output
