@@ -240,6 +240,11 @@ function updateWorkAreaVisibility(){
 function activateWorkTab(id){
   document.querySelectorAll(".work-tab").forEach(b=>b.classList.toggle("active",b.dataset.tabId===id));
   document.querySelectorAll(".work-panel").forEach(p=>p.classList.toggle("active",p.dataset.tabId===id));
+  // re-fit in case the window resized while this tab was hidden (a hidden
+  // xterm container can't measure itself, so this only takes effect now
+  // that .active makes it visible again)
+  const tab=workTabs.get(id);
+  if(tab?.fitAddon)tab.fitAddon.fit();
 }
 
 function closeWorkTab(id){
@@ -299,15 +304,29 @@ function openView(name,path){
 function openTerminal(host){
   openWorkTab("terminal",host,host,(panel,tab)=>{
     const term=new Terminal({convertEol:true, fontSize:13});
+    const fitAddon=new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
     term.open(panel);
+    fitAddon.fit();  // size to the actual panel, not xterm's 80x24 default
     const proto=location.protocol==="https:"?"wss:":"ws:";
     const socket=new WebSocket(`${proto}//${location.host}/ws/terminal/${host}`);
     socket.onmessage=ev=>term.write(ev.data);
     socket.onclose=()=>term.write("\r\n[connection closed]\r\n");
     term.onData(data=>{if(socket.readyState===WebSocket.OPEN)socket.send(data)});
-    tab.term=term; tab.socket=socket;
+    tab.term=term; tab.socket=socket; tab.fitAddon=fitAddon;
   });
 }
+
+let resizeDebounce=null;
+addEventListener("resize",()=>{
+  clearTimeout(resizeDebounce);
+  resizeDebounce=setTimeout(()=>{
+    const activePanel=document.querySelector(".work-panel.active");
+    const id=activePanel?.dataset.tabId;
+    const tab=id&&workTabs.get(id);
+    if(tab?.fitAddon)tab.fitAddon.fit();
+  },150);
+});
 
 document.querySelectorAll(".terminal-tile").forEach(btn=>{
   btn.addEventListener("click",()=>openTerminal(btn.dataset.host));
