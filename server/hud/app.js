@@ -34,62 +34,15 @@ const feed=$("feed");
 /* ============================== clock ============================== */
 setInterval(()=>{const d=new Date();$("clock").textContent=d.toTimeString().slice(0,8)},500);
 
-/* ============================== reactor ============================ */
-const cv=$("reactor"), ctx=cv.getContext("2d");
-function sizeCanvas(){const r=cv.parentElement.getBoundingClientRect();cv.width=r.width*devicePixelRatio;cv.height=r.height*devicePixelRatio}
-sizeCanvas(); addEventListener("resize",sizeCanvas);
-let rot=0;
-const STATE_STYLE={
-  standby:{speed:.15,color:"#00e5ff",glow:18,pulse:0},
-  listening:{speed:.5,color:"#19f0d8",glow:30,pulse:1},
-  thinking:{speed:1.6,color:"#ffb300",glow:26,pulse:.4},
-  tool:{speed:2.4,color:"#ffb300",glow:32,pulse:.6},
-  speaking:{speed:.7,color:"#00e5ff",glow:34,pulse:.8},
-  error:{speed:.05,color:"#ff4d5e",glow:22,pulse:0},
-};
-function drawRing(cx,cy,r,w,color,alpha,dash,offset){
-  ctx.beginPath(); ctx.strokeStyle=color; ctx.globalAlpha=alpha; ctx.lineWidth=w;
-  if(dash)ctx.setLineDash(dash); else ctx.setLineDash([]);
-  ctx.lineDashOffset=offset||0;
-  ctx.arc(cx,cy,r,0,Math.PI*2); ctx.stroke(); ctx.globalAlpha=1; ctx.setLineDash([]);
-}
-function frame(t){
-  const s=STATE_STYLE[state]||STATE_STYLE.standby;
-  rot+=s.speed;
-  const W=cv.width,H=cv.height,cx=W/2,cy=H/2;
-  const base=Math.min(W,H)*0.40;
-  ctx.clearRect(0,0,W,H);
-  ctx.shadowColor=s.color; ctx.shadowBlur=s.glow*devicePixelRatio;
-  const pulse=1+Math.sin(t/300)*0.012*(1+s.pulse*3)+(state==="listening"?level*0.10:0);
-  drawRing(cx,cy,base*pulse,2*devicePixelRatio,s.color,.9);
-  drawRing(cx,cy,base*.86,1.2*devicePixelRatio,s.color,.45,[40,18],rot*2);
-  drawRing(cx,cy,base*.72,5*devicePixelRatio,s.color,.25,[4,10],-rot*3);
-  drawRing(cx,cy,base*.58,1.5*devicePixelRatio,s.color,.6,[90,40],rot*1.2);
-  // ticks
-  ctx.shadowBlur=0;
-  for(let i=0;i<60;i++){
-    const a=(i/60)*Math.PI*2+rot/180;
-    const r1=base*1.06,r2=base*(i%5===0?1.12:1.09);
-    ctx.beginPath(); ctx.strokeStyle=s.color; ctx.globalAlpha=i%5===0?.8:.3;
-    ctx.lineWidth=devicePixelRatio;
-    ctx.moveTo(cx+Math.cos(a)*r1,cy+Math.sin(a)*r1);
-    ctx.lineTo(cx+Math.cos(a)*r2,cy+Math.sin(a)*r2); ctx.stroke();
-  }
-  ctx.globalAlpha=1;
-  // core
-  ctx.shadowColor=s.color; ctx.shadowBlur=40*devicePixelRatio;
-  const g=ctx.createRadialGradient(cx,cy,0,cx,cy,base*.42);
-  g.addColorStop(0,s.color+"55"); g.addColorStop(1,"transparent");
-  ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,base*.42,0,Math.PI*2); ctx.fill();
-  ctx.shadowBlur=0;
-  requestAnimationFrame(frame);
-}
-requestAnimationFrame(frame);
-
+/* ============================== status indicator ==================== */
+const STATUS_DOT_CLASSES=["standby","listening","thinking","tool","speaking","error"];
 function setState(st,label,hint){
   state=st;
   $("stateLabel").textContent=label;
   if(hint!==undefined)$("stateHint").textContent=hint;
+  const dot=$("status-indicator");
+  STATUS_DOT_CLASSES.forEach(c=>dot.classList.remove(c));
+  dot.classList.add(st);
 }
 
 /* ============================== feed =============================== */

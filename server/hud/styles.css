@@ -52,10 +52,17 @@ header .sub{font-size:12px; letter-spacing:3px; color:var(--txt-dim)}
 .dot.on{background:var(--teal); box-shadow:0 0 6px var(--teal)}
 .dot.off{background:var(--red); box-shadow:0 0 6px var(--red)}
 #center{display:flex; flex-direction:column; align-items:center; justify-content:flex-start; position:relative; overflow:hidden}
-#reactorWrap{position:relative; width:min(46vh,440px); height:min(46vh,440px); cursor:pointer; flex-shrink:0}
-#reactor{width:100%; height:100%}
+#reactorWrap{position:relative; width:100%; max-width:420px; height:120px; cursor:pointer; flex-shrink:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px}
+.status-dot{
+  width:18px; height:18px; border-radius:50%; background:var(--txt-dim);
+  transition:background .3s ease, box-shadow .3s ease;
+}
+.status-dot.listening{background:var(--cyan); box-shadow:0 0 12px var(--cyan)}
+.status-dot.thinking,.status-dot.tool{background:var(--amber); box-shadow:0 0 12px var(--amber)}
+.status-dot.speaking{background:var(--teal); box-shadow:0 0 12px var(--teal)}
+.status-dot.error{background:var(--red); box-shadow:0 0 12px var(--red)}
 #coreState{
-  position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
   pointer-events:none; font-family:'Orbitron';
 }
 #coreState .st{font-size:15px; letter-spacing:6px; color:var(--cyan)}
