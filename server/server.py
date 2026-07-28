@@ -1413,6 +1413,19 @@ def _maybe_schedule_partial(ws: WebSocket, pipeline: VoicePipelineServer, conn: 
     conn.partial_task = asyncio.create_task(run())
 
 
+@app.websocket("/ws/terminal/{host}")
+async def terminal_websocket(ws: WebSocket, host: str) -> None:
+    if not _ws_allowed(ws):
+        await ws.close(code=4401)
+        return
+    if not is_allowed_terminal_host(host):
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    # SSH proxy body added in Task 10
+    await ws.close(code=1000)
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     if not _ws_allowed(ws):

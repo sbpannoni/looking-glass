@@ -20,3 +20,25 @@ def test_terminal_hosts_have_required_fields():
     for name, spec in srv.TERMINAL_HOSTS.items():
         assert "host" in spec, f"{name} missing 'host'"
         assert "user" in spec, f"{name} missing 'user'"
+
+
+from fastapi.testclient import TestClient
+
+client = TestClient(srv.app)
+
+
+def test_terminal_ws_rejects_unknown_host():
+    with client.websocket_connect("/ws/terminal/not-a-real-host") as ws:
+        data = ws.receive()
+        assert data["type"] == "websocket.close"
+        assert data["code"] == 4404
+
+
+def test_terminal_ws_rejects_disallowed_origin(monkeypatch):
+    monkeypatch.setattr(srv, "ALLOWED_ORIGIN_HOSTS", {"jarvis.local"})
+    with client.websocket_connect(
+        "/ws/terminal/snarf", headers={"origin": "https://evil.example"}
+    ) as ws:
+        data = ws.receive()
+        assert data["type"] == "websocket.close"
+        assert data["code"] == 4401
