@@ -239,6 +239,21 @@ const workTabs=new Map(); // id -> {type, title, term?, socket?, iframe?}
 
 function tabId(type,key){return `${type}:${key}`}
 
+/* Global shortcuts must never steal keys from something the user is typing
+   into. Exempting only #chatInput meant Space (preventDefault-ed for
+   push-to-talk), S, B and Escape were all swallowed inside xterm terminals —
+   you could not type a space in the Claude pane. */
+function isTypingContext(){
+  const el=document.activeElement;
+  if(!el) return false;
+  if(el.isContentEditable) return true;
+  const tag=(el.tagName||"").toLowerCase();
+  if(tag==="input"||tag==="textarea"||tag==="select") return true;
+  // xterm puts focus on a hidden textarea inside .xterm; also treat any
+  // focus inside the work area as "the user is working in a pane".
+  return !!el.closest?.(".xterm, #work-area");
+}
+
 /* ---- view model -------------------------------------------------------
    Two distinct operations, which used to be conflated:
 
@@ -336,7 +351,10 @@ function hudTurn(swap,{reverse=false}={}){
 }
 
 function updateWorkAreaVisibility(){
-  $("work-area").classList.toggle("has-tabs",workTabs.size>0);
+  const hasTabs=workTabs.size>0;
+  $("work-area").classList.toggle("has-tabs",hasTabs);
+  // Suspend the 3D scenery whenever real work is on screen.
+  if(typeof setSceneryPaused==="function") setSceneryPaused(hasTabs);
 }
 
 /* ---- split view -------------------------------------------------------
@@ -616,7 +634,7 @@ document.querySelectorAll('[data-action="sidebars"]').forEach(btn=>{
   btn.addEventListener("click",toggleSidebars);
 });
 addEventListener("keydown",e=>{
-  if((e.key==="s"||e.key==="S") && document.activeElement!==$("chatInput")) toggleSidebars();
+  if((e.key==="s"||e.key==="S") && !isTypingContext()) toggleSidebars();
 });
 document.querySelectorAll('[data-action="theme"]').forEach(btn=>{
   btn.addEventListener("click",toggleTheme);
@@ -658,11 +676,12 @@ document.querySelectorAll('[data-action="netmap"]').forEach(btn=>{
 
 addEventListener("keydown",e=>{
   if(e.key!=="Escape")return;
+  if(isTypingContext())return;   // Esc belongs to the terminal / editor
   if(document.querySelector(".holo:not(.dismiss)"))dismissAllPanels();
   else stopRun();
 });
 addEventListener("keydown",e=>{
-  if(e.code==="Space"&&document.activeElement!==$("chatInput")){e.preventDefault();toggleTalk()}
+  if(e.code==="Space" && !isTypingContext()){e.preventDefault();toggleTalk()}
 });
 
 /* ============================== typed chat ========================= */
@@ -838,7 +857,7 @@ async function bootSequence(full){
   bootRunning=false;
 }
 addEventListener("keydown",e=>{
-  if((e.key==="b"||e.key==="B")&&document.activeElement!==$("chatInput"))bootSequence(true);
+  if((e.key==="b"||e.key==="B") && !isTypingContext())bootSequence(true);
 });
 bootSequence(new URLSearchParams(location.search).get("boot")==="full");
 

@@ -434,6 +434,28 @@ footer{
 .bar{height:3px; background:#0a2435; margin-top:3px}
 .bar i{display:block; height:100%; background:linear-gradient(90deg,var(--cyan-dim),var(--cyan)); width:0%; transition:width .4s}
 
+/* ---- kanban board + task log panes ---- */
+.kanban-pane{display:flex; flex-direction:column; overflow:hidden}
+.kb-head{font-family:'Orbitron'; font-size:9px; letter-spacing:2px; color:var(--txt-dim); padding:2px 2px 8px}
+.kb-list{flex:1; overflow-y:auto; display:grid; gap:6px; align-content:start}
+.kb-card{
+  border:1px solid var(--line); border-radius:8px; padding:8px 10px; cursor:pointer;
+  background:color-mix(in srgb, var(--panel) 70%, transparent); transition:border-color .15s ease;
+}
+.kb-card:hover{border-color:var(--cyan)}
+.kb-card.live{border-color:var(--amber); box-shadow:0 0 12px -4px var(--amber)}
+.kb-row{display:flex; justify-content:space-between; font-size:11px}
+.kb-row b{font-family:'Orbitron'; font-size:9px; letter-spacing:1px}
+.kb-age{color:var(--txt-dim); font-size:10px}
+.kb-title{font-size:13px; margin:3px 0 2px}
+.kb-meta{font-size:10px; color:var(--txt-dim)}
+.tasklog-pane{display:flex; overflow:hidden}
+.kb-log{
+  flex:1; margin:0; overflow:auto; white-space:pre-wrap; word-break:break-word;
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; line-height:1.35;
+  color:#cfe3ee; background:#04070d; border-radius:8px; padding:10px;
+}
+
 /* ---- backend service control rows ---- */
 .svc-row{padding:4px 0}
 .svc-row + .svc-row{border-top:1px solid var(--line); margin-top:4px}

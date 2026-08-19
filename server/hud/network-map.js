@@ -375,6 +375,22 @@ function linkColorFn(l){
   return LAYER_COLOR[l.layer]||"#888";
 }
 
+/* The landscape is decoration. While a work pane is open (terminals,
+   dashboards) it competes for GPU with things the user is actually using and
+   made the HUD feel laggy, so rendering is suspended until the panes close. */
+window.setSceneryPaused=function(paused){
+  if(!graph) return;
+  try{
+    if(paused){
+      graph.pauseAnimation();
+      if(idleSpin){ cancelAnimationFrame(idleSpin); idleSpin=null; }
+    }else if(netmapActive || document.body.classList.contains("view-map")){
+      graph.resumeAnimation();
+      if(!idleSpin) tickIdle();
+    }
+  }catch{}
+};
+
 function applyData(){
   if(!graph) return;
   // Must respect the current view: the 15s topology poll calls this

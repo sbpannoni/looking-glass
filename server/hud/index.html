@@ -77,7 +77,7 @@
       <div class="kv"><span>Brain</span><b id="mBrain">—</b></div>
     </div>
     <div class="panel"><h2><span>VIEWS</span><span class="num">04</span></h2>
-      <button class="btn viewBtn" data-view="KANBAN" data-path="/kanban">▸ KANBAN BOARD</button>
+      <button class="btn viewBtn" data-action="kanban" style="border-color:var(--amber); color:var(--amber)">▤ AGENT WORK (KANBAN)</button>
       <button class="btn viewBtn" data-view="HERMES DASHBOARD" data-path="/">▸ HERMES DASHBOARD</button>
       <button class="btn viewBtn" data-view="CHAT" data-path="/chat">▸ DASHBOARD CHAT</button>
       <button class="btn viewBtn" id="netmapToggleBtn" data-action="netmap">▸ NETWORK MAP</button>
@@ -178,6 +178,7 @@
 <script src="app.js"></script>
 <script src="panels.js"></script>
 <script src="vllm-control.js"></script>
+<script src="kanban.js"></script>
 <script src="network-map.js"></script>
 </body>
 </html>

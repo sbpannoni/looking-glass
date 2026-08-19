@@ -1247,6 +1247,59 @@ async def _push_activity_event(event: dict) -> None:
             WS_CLIENTS.discard(client)
 
 
+# ---------------------------------------------------------------- kanban view
+# The HUD's own chat session is NOT where agentic work happens — each kanban
+# card runs in its own Hermes session and workspace. Managing that work means
+# reading the board and the per-task run logs, which live on the hermes box.
+
+def _kanban_cfg() -> dict:
+    return CFG.get("kanban") or {"host": "hermes"}
+
+
+async def _kanban_ssh(cmd: str) -> tuple[int, str]:
+    target = TERMINAL_HOSTS.get(_kanban_cfg().get("host", "hermes"))
+    if not target:
+        raise RuntimeError("kanban host is not a known terminal host")
+    async with asyncssh.connect(
+        target["host"], username=target["user"], client_keys=[TERMINAL_KEY_PATH],
+    ) as conn:
+        result = await conn.run(cmd, check=False)
+        return result.exit_status, (result.stdout or "") + (result.stderr or "")
+
+
+@app.get("/api/kanban")
+async def kanban_board() -> JSONResponse:
+    try:
+        _, out = await _kanban_ssh("hermes kanban ls --json --sort created-desc")
+    except Exception as exc:
+        return JSONResponse({"tasks": [], "error": str(exc)}, status_code=502)
+    try:
+        data = json.loads(out.strip() or "[]")
+    except json.JSONDecodeError:
+        return JSONResponse({"tasks": [], "error": "unparseable board output"}, status_code=502)
+    rows = data if isinstance(data, list) else data.get("tasks", [])
+    keep = ("id", "title", "status", "assignee", "created_by", "created_at",
+            "started_at", "completed_at", "result", "session_id")
+    return JSONResponse({"tasks": [{k: t.get(k) for k in keep} for t in rows]})
+
+
+_TASK_ID_RE = re.compile(r"^t_[0-9a-f]{6,}$")
+
+
+@app.get("/api/kanban/{task_id}/log")
+async def kanban_log(task_id: str, request: Request) -> JSONResponse:
+    """Tail of a task's run log — this is the live view of Hermes working."""
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"error": "bad task id"}, status_code=400)
+    lines = min(int(request.query_params.get("lines", 200)), 1000)
+    try:
+        _, out = await _kanban_ssh(
+            f"tail -n {lines} ~/.hermes/kanban/logs/{shlex.quote(task_id)}.log 2>/dev/null || true")
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse({"id": task_id, "log": out[-60000:]})
+
+
 @app.get("/api/conversation")
 async def conversation_history(request: Request) -> JSONResponse:
     """Message history for the HUD's shared Hermes session.
