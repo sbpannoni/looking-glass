@@ -432,7 +432,11 @@ function openWorkTab(type,key,title,buildContent){
   tabBtn.className="work-tab"; tabBtn.dataset.tabId=id;
   const label=document.createElement("span"); label.textContent=title;
   const split=document.createElement("span");
-  split.className="work-tab-split"; split.textContent="⫿"; split.title="Pin to right pane (split view)";
+  // ◧ (half-filled square) reads as "split panes". The previous ⫿ rendered as
+  // a hairline that looked like a separator, so the control was invisible and
+  // nobody could find split view.
+  split.className="work-tab-split"; split.textContent="◧";
+  split.title="Split: pin this tab to the right pane";
   const close=document.createElement("span"); close.className="work-tab-close"; close.textContent="✕";
   label.onclick=()=>activateWorkTab(id);
   split.onclick=e=>{e.stopPropagation();toggleSplit(id)};

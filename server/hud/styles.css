@@ -223,9 +223,17 @@ button.btn.amber{color:var(--amber); border-color:#7a5a1a; background:#241c0a}
 #work-content.split .work-panel.active,
 #work-content.split .work-panel.split-right{display:block; flex:1 1 50%; min-width:0}
 #work-content.split .work-panel.split-right{border-left:1px solid var(--line)}
-.work-tab-split{color:var(--txt-dim); font-size:11px; cursor:pointer}
-.work-tab-split:hover{color:var(--cyan)}
-.work-tab.is-split .work-tab-split{color:var(--magenta)}
+/* The split control has to be visibly a BUTTON — as a bare dim glyph it read
+   as punctuation and went unnoticed. */
+.work-tab-split{
+  color:var(--txt-dim); font-size:13px; line-height:1; cursor:pointer;
+  border:1px solid var(--line); border-radius:4px; padding:1px 4px;
+  transition:color .15s ease, border-color .15s ease, background .15s ease;
+}
+.work-tab-split:hover{color:var(--cyan); border-color:var(--cyan); background:#0a2435}
+.work-tab.is-split .work-tab-split{
+  color:var(--magenta); border-color:var(--magenta); background:#2a0a24;
+}
 .work-view-iframe{width:100%; height:100%; border:0; background:var(--bg)}
 
 /* ---------------- 3D view transitions ----------------
