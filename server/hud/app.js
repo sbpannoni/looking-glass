@@ -339,12 +339,59 @@ function updateWorkAreaVisibility(){
   $("work-area").classList.toggle("has-tabs",workTabs.size>0);
 }
 
+/* ---- split view -------------------------------------------------------
+   splitRightId is the tab pinned to the right pane. The left pane continues
+   to follow normal tab selection, so you can drive one side while the other
+   stays fixed. Pinning is a layout operation, not a view change — it must
+   not rotate the HUD. */
+let splitRightId=null;
+
+function applySplitLayout(){
+  const content=$("work-content");
+  content.classList.toggle("split", !!splitRightId);
+  document.querySelectorAll(".work-panel").forEach(p=>{
+    p.classList.toggle("split-right", p.dataset.tabId===splitRightId);
+  });
+  document.querySelectorAll(".work-tab").forEach(b=>{
+    b.classList.toggle("is-split", b.dataset.tabId===splitRightId);
+  });
+  refitAllVisibleWorkTabs();
+}
+
+function toggleSplit(id){
+  // Pinning the tab that is already pinned un-pins it. Pinning the tab that
+  // is currently active would show the same content twice, so move selection
+  // to any other tab first.
+  splitRightId = (splitRightId===id) ? null : id;
+  if(splitRightId){
+    const active=document.querySelector(".work-panel.active");
+    if(active && active.dataset.tabId===splitRightId){
+      const other=[...workTabs.keys()].find(k=>k!==splitRightId);
+      if(other) activateWorkTab(other); else splitRightId=null;
+    }
+  }
+  applySplitLayout();
+}
+
+function refitAllVisibleWorkTabs(){
+  // Both panes changed size, so every visible tab needs re-measuring.
+  requestAnimationFrame(()=>{
+    document.querySelectorAll(".work-panel.active, .work-panel.split-right").forEach(p=>{
+      const tab=workTabs.get(p.dataset.tabId);
+      if(tab?.fitAddon)tab.fitAddon.fit();
+      if(tab?.onActivate)tab.onActivate();
+    });
+  });
+}
+
 function activateWorkTab(id){
   document.querySelectorAll(".work-tab").forEach(b=>b.classList.toggle("active",b.dataset.tabId===id));
   document.querySelectorAll(".work-panel").forEach(p=>p.classList.toggle("active",p.dataset.tabId===id));
   // re-fit in case the window resized while this tab was hidden (a hidden
   // xterm container can't measure itself, so this only takes effect now
   // that .active makes it visible again)
+  // The pinned pane must survive a selection change in the left pane.
+  if(splitRightId) applySplitLayout();
   const tab=workTabs.get(id);
   if(tab?.fitAddon)tab.fitAddon.fit();
   // Extension point: any work-tab type can set tab.onActivate (e.g. to
@@ -365,11 +412,13 @@ function closeWorkTab(id){
 function closeWorkTabNow(id){
   const tab=workTabs.get(id);
   if(!tab)return;
+  if(splitRightId===id) splitRightId=null;
   if(tab.socket)tab.socket.close();
   if(tab.term)tab.term.dispose();
   document.querySelector(`.work-tab[data-tab-id="${id}"]`)?.remove();
   document.querySelector(`.work-panel[data-tab-id="${id}"]`)?.remove();
   workTabs.delete(id);
+  applySplitLayout();
   const remaining=[...workTabs.keys()];
   if(remaining.length)activateWorkTab(remaining[remaining.length-1]);
   updateWorkAreaVisibility();
@@ -382,10 +431,13 @@ function openWorkTab(type,key,title,buildContent){
   const tabBtn=document.createElement("div");
   tabBtn.className="work-tab"; tabBtn.dataset.tabId=id;
   const label=document.createElement("span"); label.textContent=title;
+  const split=document.createElement("span");
+  split.className="work-tab-split"; split.textContent="⫿"; split.title="Pin to right pane (split view)";
   const close=document.createElement("span"); close.className="work-tab-close"; close.textContent="✕";
   label.onclick=()=>activateWorkTab(id);
+  split.onclick=e=>{e.stopPropagation();toggleSplit(id)};
   close.onclick=e=>{e.stopPropagation();closeWorkTab(id)};
-  tabBtn.append(label,close);
+  tabBtn.append(label,split,close);
   $("work-tabs").appendChild(tabBtn);
 
   const panel=document.createElement("div");
@@ -437,8 +489,8 @@ function openView(name,path){
   });
 }
 
-function openTerminal(host){
-  openWorkTabTurning("terminal",host,host,(panel,tab)=>{
+function openTerminal(host,{run=null,title=null}={}){
+  openWorkTabTurning("terminal",host,title||host,(panel,tab)=>{
     const term=new Terminal({convertEol:true, fontSize:13});
     const fitAddon=new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
@@ -447,6 +499,13 @@ function openTerminal(host){
     const proto=location.protocol==="https:"?"wss:":"ws:";
     const socket=new WebSocket(`${proto}//${location.host}/ws/terminal/${host}`);
     socket.onmessage=ev=>term.write(ev.data);
+    // Optional boot command (e.g. launching `claude`). Sent once the shell is
+    // actually up rather than on socket open, or it lands before the prompt.
+    if(run){
+      let sent=false;
+      const armed=setTimeout(()=>{ if(!sent&&socket.readyState===WebSocket.OPEN){sent=true;socket.send(run+"\n");} },1200);
+      tab.cancelBoot=()=>clearTimeout(armed);
+    }
     socket.onclose=()=>term.write("\r\n[connection closed]\r\n");
     term.onData(data=>{if(socket.readyState===WebSocket.OPEN)socket.send(data)});
     tab.term=term; tab.socket=socket; tab.fitAddon=fitAddon;
@@ -477,6 +536,12 @@ document.querySelectorAll("[data-view]").forEach(btn=>{
 });
 document.querySelectorAll('[data-action="theme"]').forEach(btn=>{
   btn.addEventListener("click",toggleTheme);
+});
+document.querySelectorAll('[data-action="claude"]').forEach(btn=>{
+  // Claude runs on claude-control; this opens a terminal there and launches
+  // it, so pinning it beside the Hermes chat gives the side-by-side review
+  // setup in two clicks.
+  btn.addEventListener("click",()=>openTerminal("claude-control",{run:"claude",title:"claude"}));
 });
 document.querySelectorAll('[data-action="netmap"]').forEach(btn=>{
   // network-map.js loads after this file, so resolve the handler at click time.
