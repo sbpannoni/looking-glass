@@ -644,7 +644,10 @@ document.querySelectorAll('[data-action="pair"]').forEach(btn=>{
   // repo on the right, already split. Hunting for two buttons and then a
   // pin control was too much to discover.
   btn.addEventListener("click",()=>{
-    openHermesChatPane();
+    // Pairs the KANBAN BOARD with Claude, not the HUD chat thread. The chat
+    // thread is a different conversation from where cards actually execute —
+    // pairing it with the reviewer was showing the wrong half of the system.
+    openKanbanBoard();
     setTimeout(()=>{
       openTerminal("snarf",{run:"cd /ssdpool/DARKHELIX && bash -lc claude",title:"claude · DARKHELIX"});
       setTimeout(()=>{ if(!splitRightId) toggleSplit(tabId("terminal","snarf")); },900);
