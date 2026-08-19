@@ -1,27 +1,82 @@
 :root, :root[data-theme="dark"]{
-  --bg:#0f1117; --panel:#171a23; --line:#2a2f3d;
-  --cyan:#7c6cf6; --cyan-dim:#5b4fd1; --teal:#4ade80;
-  --amber:#fbbf24; --red:#f87171; --txt:#e8eaf0; --txt-dim:#9198a9;
+  --bg:#0a0c12; --panel:#12141d; --line:#262b3a;
+  --cyan:#22e5ff; --cyan-dim:#0e9fbf; --teal:#4ade80;
+  --amber:#fbbf24; --red:#f87171; --magenta:#ff2fd0; --orange:#ff8a3d;
+  --txt:#e8eaf0; --txt-dim:#9198a9;
 }
 :root[data-theme="light"]{
   --bg:#f6f7fb; --panel:#ffffff; --line:#e2e5ed;
-  --cyan:#6a5af0; --cyan-dim:#5949e0; --teal:#16a34a;
-  --amber:#d97706; --red:#dc2626; --txt:#14161d; --txt-dim:#62687a;
+  --cyan:#0aa3c2; --cyan-dim:#087f96; --teal:#16a34a;
+  --amber:#d97706; --red:#dc2626; --magenta:#c026a3; --orange:#c2540b;
+  --txt:#14161d; --txt-dim:#62687a;
 }
 @media (prefers-color-scheme: light){
   :root:not([data-theme]){
     --bg:#f6f7fb; --panel:#ffffff; --line:#e2e5ed;
-    --cyan:#6a5af0; --cyan-dim:#5949e0; --teal:#16a34a;
-    --amber:#d97706; --red:#dc2626; --txt:#14161d; --txt-dim:#62687a;
+    --cyan:#0aa3c2; --cyan-dim:#087f96; --teal:#16a34a;
+    --amber:#d97706; --red:#dc2626; --magenta:#c026a3; --orange:#c2540b;
+    --txt:#14161d; --txt-dim:#62687a;
   }
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{
-  background:var(--bg);
+  background:transparent;                /* #bgDepth supplies the base color + depth */
   color:var(--txt); font-family:'Rajdhani',sans-serif; overflow:hidden;
-  transition:background .2s ease, color .2s ease;
+  transition:color .2s ease;
 }
+
+/* ---------------- dark 3D depth background ---------------- */
+#bgDepth{position:fixed; inset:0; z-index:-1; overflow:hidden; background:var(--bg); pointer-events:none}
+#bgDepth .bgGrid{
+  position:absolute; left:-50%; right:-50%; bottom:-20%; height:140%;
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size:48px 48px;
+  transform:perspective(600px) rotateX(72deg); transform-origin:bottom;
+  opacity:.4; animation:bgGridScroll 14s linear infinite;
+}
+@keyframes bgGridScroll{from{background-position:0 0,0 0}to{background-position:0 48px,48px 0}}
+#bgDepth .bgGlow{position:absolute; border-radius:50%; filter:blur(80px); opacity:.22; mix-blend-mode:screen}
+#bgDepth .g1{width:46vw; height:46vw; left:-10vw; top:-14vw; background:var(--cyan)}
+#bgDepth .g2{width:38vw; height:38vw; right:-8vw; top:10vh; background:var(--magenta)}
+#bgDepth .g3{width:34vw; height:34vw; left:20vw; bottom:-16vw; background:var(--orange)}
+:root[data-theme="light"] #bgDepth{display:none}
+@media (prefers-color-scheme:light){ :root:not([data-theme]) #bgDepth{display:none} }
+body.netmap-on #bgDepth .bgGrid{opacity:.08; transition:opacity .6s}
+body.netmap-on #bgDepth .bgGlow{opacity:.12; transition:opacity .6s}
+
+/* ---------------- network map (ambient, full-viewport, not a window) ---- */
+#netmapLayer{position:fixed; inset:0; z-index:-1; display:none}
+#netmapLayer.active{display:block}
+#netmapLayer canvas{display:block}
+/* Both overlays are confined to the centre grid column (the side columns are
+   320px + 8px gap + 8px padding = 336px), so they can never sit on top of the
+   status panels the way an earlier right-anchored version did. */
+#netmapControls{
+  position:fixed; top:64px; left:344px; right:344px; z-index:6;
+  display:none; align-items:center; justify-content:center; gap:14px;
+  flex-wrap:wrap; padding:8px 14px; border-radius:10px;
+  background:color-mix(in srgb, var(--panel) 78%, transparent); border:1px solid var(--line);
+  backdrop-filter:blur(8px); box-shadow:0 8px 24px -10px #000c;
+  font-size:12px; color:var(--txt-dim);
+}
+.netmap-title{font-family:'Orbitron'; font-size:10px; letter-spacing:2px; color:var(--magenta)}
+#netmapControls label{display:flex; align-items:center; gap:4px; cursor:pointer; user-select:none}
+.netmap-zoom input[type=range]{width:90px; accent-color:var(--magenta)}
+#netmapInfo{
+  position:fixed; top:118px; left:352px; z-index:6; width:236px; display:none;
+  background:color-mix(in srgb, var(--panel) 88%, transparent); border:1px solid var(--line);
+  border-radius:10px; padding:10px 12px; backdrop-filter:blur(8px);
+  box-shadow:0 8px 24px -8px #000c;
+}
+#netmapInfo .btn{width:100%; margin-top:8px; font-size:10px; padding:7px 10px}
+@media (max-width:880px){
+  #netmapControls{left:8px; right:8px; top:56px}
+  #netmapInfo{left:8px; right:8px; width:auto; top:auto; bottom:8px}
+}
+
 #theme-toggle{
   background:none; border:1px solid var(--line); border-radius:8px; color:var(--txt-dim);
   width:30px; height:30px; cursor:pointer; font-size:14px; line-height:1;
@@ -37,10 +92,22 @@ header .sub{font-size:12px; letter-spacing:3px; color:var(--txt-dim)}
 #clock{font-family:'Orbitron'; font-size:15px; letter-spacing:2px; color:var(--teal)}
 .col{display:flex; flex-direction:column; gap:8px; overflow-y:auto; scrollbar-width:thin; scrollbar-color:var(--line) transparent}
 .panel{
-  border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:12px 14px; position:relative;
+  --panel-accent:var(--cyan);
+  border:1px solid var(--line); border-radius:10px; padding:12px 14px; position:relative;
+  background:color-mix(in srgb, var(--panel) 88%, transparent);
+  backdrop-filter:blur(6px);
+  box-shadow:0 0 0 1px #0000004d, 0 8px 24px -12px #000c, inset 0 1px 0 #ffffff08;
 }
+.panel::before{
+  content:""; position:absolute; left:14px; right:14px; top:0; height:1px;
+  background:linear-gradient(90deg, transparent, var(--panel-accent), transparent); opacity:.65;
+}
+.panel.accent-amber{--panel-accent:var(--amber)}
+.panel.accent-magenta{--panel-accent:var(--magenta)}
+.panel.accent-orange{--panel-accent:var(--orange)}
+.panel.accent-teal{--panel-accent:var(--teal)}
 .panel h2{
-  font-family:'Orbitron'; font-size:10px; letter-spacing:3px; color:var(--cyan);
+  font-family:'Orbitron'; font-size:10px; letter-spacing:3px; color:var(--panel-accent);
   border-bottom:1px solid var(--line); padding-bottom:5px; margin-bottom:7px;
   display:flex; justify-content:space-between;
 }
@@ -51,36 +118,55 @@ header .sub{font-size:12px; letter-spacing:3px; color:var(--txt-dim)}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--txt-dim)}
 .dot.on{background:var(--teal); box-shadow:0 0 6px var(--teal)}
 .dot.off{background:var(--red); box-shadow:0 0 6px var(--red)}
-#center{display:flex; flex-direction:column; align-items:center; justify-content:flex-start; position:relative; overflow:hidden}
-#reactorWrap{position:relative; width:100%; max-width:420px; height:120px; cursor:pointer; flex-shrink:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px}
+#center{display:flex; flex-direction:column; align-items:stretch; justify-content:flex-end; position:relative; overflow:hidden; height:100%}
 .status-dot{
-  width:18px; height:18px; border-radius:50%; background:var(--txt-dim);
+  width:14px; height:14px; border-radius:50%; background:var(--txt-dim); flex-shrink:0;
   transition:background .3s ease, box-shadow .3s ease;
 }
 .status-dot.listening{background:var(--cyan); box-shadow:0 0 12px var(--cyan)}
 .status-dot.thinking,.status-dot.tool{background:var(--amber); box-shadow:0 0 12px var(--amber)}
 .status-dot.speaking{background:var(--teal); box-shadow:0 0 12px var(--teal)}
 .status-dot.error{background:var(--red); box-shadow:0 0 12px var(--red)}
-#coreState{
-  display:flex; flex-direction:column; align-items:center; justify-content:center;
-  pointer-events:none; font-family:'Orbitron';
-}
-#coreState .st{font-size:15px; letter-spacing:6px; color:var(--cyan)}
-#coreState .hint{font-size:9px; letter-spacing:2px; color:var(--txt-dim); margin-top:6px}
-#feed{
-  width:100%; max-width:680px; flex:1; overflow-y:auto; margin-top:4px; padding:0 10px;
-  display:flex; flex-direction:column; gap:6px; scrollbar-width:thin;
-}
 .msg{font-size:14.5px; line-height:1.35; padding:7px 11px; border:1px solid var(--line); background:var(--panel); max-width:88%}
 .msg.you{align-self:flex-end; border-color:#205a6e; color:#cfeefb}
 .msg.looking-glass{align-self:flex-start; border-left:2px solid var(--cyan)}
 .msg.sys{align-self:center; color:var(--txt-dim); font-size:12px; border:none; background:none; padding:2px}
-#chatRow{display:flex; gap:8px; width:100%; max-width:680px; padding:8px 10px}
-#chatInput{
-  flex:1; background:#06101c; border:1px solid var(--line); color:#cfeefb; padding:9px 12px;
-  font-family:'Rajdhani'; font-size:15px; outline:none;
+
+/* ---- compact bottom dock (was: a full centered voice console — now a
+   thin strip so the moonscape/network map behind it stays the main view) */
+#hermesDock{
+  display:flex; align-items:center; gap:8px; padding:8px 10px; margin:0 auto 12px;
+  width:min(680px,94%); flex-shrink:0; border-radius:12px;
+  background:color-mix(in srgb, var(--panel) 85%, transparent); border:1px solid var(--line);
+  backdrop-filter:blur(8px); box-shadow:0 8px 24px -10px #000c, 0 0 0 1px #0000004d;
 }
-#chatInput:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+.dock-icon{
+  background:none; border:1px solid var(--line); border-radius:8px; color:var(--txt-dim);
+  width:32px; height:32px; flex-shrink:0; cursor:pointer; font-size:14px; line-height:1;
+}
+.dock-icon:hover{border-color:var(--cyan); color:var(--cyan)}
+#reactorWrap{
+  position:relative; cursor:pointer; flex-shrink:0;
+  display:flex; flex-direction:row; align-items:center; gap:8px; padding:0 4px;
+}
+#coreState{display:flex; flex-direction:column; align-items:flex-start; justify-content:center; pointer-events:none; font-family:'Orbitron'}
+#coreState .st{font-size:10px; letter-spacing:2px; color:var(--cyan)}
+#coreState .hint{font-size:8px; letter-spacing:1px; color:var(--txt-dim); margin-top:2px; white-space:nowrap}
+#hermesDock #chatInput{
+  flex:1; min-width:0; background:#06101c; border:1px solid var(--line); color:#cfeefb;
+  padding:8px 10px; font-family:'Rajdhani'; font-size:14px; outline:none;
+}
+#hermesDock #chatInput:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+#hermesDock .btn{padding:8px 12px; font-size:10px; flex-shrink:0}
+
+/* chat history: collapsed by default (toggled via the 💬 dock icon), sits
+   just above the dock instead of permanently eating the center of the screen */
+#feed{
+  width:min(680px,94%); max-height:0; overflow:hidden; margin:0 auto; padding:0 10px;
+  display:flex; flex-direction:column; gap:6px; scrollbar-width:thin; flex-shrink:0;
+  transition:max-height .25s ease, padding .25s ease;
+}
+#feed.open{max-height:36vh; overflow-y:auto; padding:10px}
 button.btn{
   background:#0a2435; color:var(--cyan); border:1px solid var(--cyan-dim); padding:9px 16px;
   font-family:'Orbitron'; font-size:11px; letter-spacing:2px; cursor:pointer;
@@ -122,10 +208,51 @@ button.btn.amber{color:var(--amber); border-color:#7a5a1a; background:#241c0a}
 .work-tab.active{background:var(--bg); color:var(--cyan); border-bottom:2px solid var(--cyan)}
 .work-tab-close{color:var(--txt-dim); font-size:11px}
 .work-tab-close:hover{color:var(--red)}
-#work-content{height:300px; position:relative}
+#work-content{height:440px; position:relative}
 .work-panel{display:none; height:100%; padding:8px; overflow:hidden}
 .work-panel.active{display:block}
 .work-view-iframe{width:100%; height:100%; border:0; background:var(--bg)}
+
+/* ---------------- 3D view transitions ----------------
+   Opening a view, closing one, or toggling the network map swings the work
+   area like the camera turned to face a different display, while the side
+   columns bank slightly to sell the move. Switching between already-open
+   tabs deliberately does NOT animate — tabs organize work inside a
+   workspace, they aren't a change of view.
+
+   Perspective lives on #center, not #grid: a non-none `perspective` makes an
+   element a containing block for position:fixed descendants, and #grid holds
+   the fixed #holoStage — putting it there would reparent the hologram
+   panels to the grid box. */
+#center{perspective:1800px; perspective-origin:50% 42%}
+body.hud-banking #center{overflow:visible}   /* don't clip the rotation */
+#work-area{transform-style:preserve-3d; will-change:transform,opacity}
+#work-area.turn-out{animation:viewTurnOutL .25s cubic-bezier(.4,0,.9,.45) both}
+#work-area.turn-out.rev{animation-name:viewTurnOutR}
+#work-area.turn-in{animation:viewTurnInR .34s cubic-bezier(.2,.85,.3,1) both}
+#work-area.turn-in.rev{animation-name:viewTurnInL}
+@keyframes viewTurnOutL{
+  from{transform:none; opacity:1; filter:brightness(1)}
+  to{transform:rotateY(-70deg) translateZ(-240px); opacity:.08; filter:brightness(1.5)}}
+@keyframes viewTurnOutR{
+  from{transform:none; opacity:1; filter:brightness(1)}
+  to{transform:rotateY(70deg) translateZ(-240px); opacity:.08; filter:brightness(1.5)}}
+@keyframes viewTurnInR{
+  from{transform:rotateY(70deg) translateZ(-240px); opacity:.08; filter:brightness(1.5)}
+  to{transform:none; opacity:1; filter:brightness(1)}}
+@keyframes viewTurnInL{
+  from{transform:rotateY(-70deg) translateZ(-240px); opacity:.08; filter:brightness(1.5)}
+  to{transform:none; opacity:1; filter:brightness(1)}}
+.col{transition:transform .32s cubic-bezier(.3,.8,.4,1), filter .32s ease}
+body.hud-banking .col{filter:brightness(.7) saturate(.85)}
+body.hud-banking #colLeft{transform:perspective(1500px) rotateY(7deg) translateZ(-46px)}
+body.hud-banking #colRight{transform:perspective(1500px) rotateY(-7deg) translateZ(-46px)}
+body.hud-banking header,body.hud-banking footer{filter:brightness(.78)}
+header,footer{transition:filter .32s ease}
+@media (prefers-reduced-motion:reduce){
+  #work-area.turn-out,#work-area.turn-in{animation:none}
+  body.hud-banking .col{transform:none}
+}
 
 /* ---------------- boot sequence ---------------- */
 #boot{position:fixed; inset:0; z-index:100; background:var(--bg); display:flex;
@@ -143,7 +270,7 @@ button.btn.amber{color:var(--amber); border-color:#7a5a1a; background:#241c0a}
 @keyframes lineIn{to{opacity:1}}
 @keyframes bootPulse{50%{opacity:.5}}
 body.booting .panel, body.booting header, body.booting footer,
-body.booting #chatRow, body.booting #reactorWrap, body.booting #feed{opacity:0}
+body.booting #hermesDock, body.booting #feed{opacity:0}
 body.booted .panel{animation:panelIn .55s backwards}
 body.booted header{animation:panelIn .4s backwards}
 @keyframes panelIn{0%{opacity:0; transform:translateY(10px)}55%{opacity:.45}65%{opacity:.95}
@@ -224,12 +351,12 @@ body.booted header{animation:panelIn .4s backwards}
   header .sub{display:none}
   #clock{font-size:12px}
   #center{order:1; min-height:0}
-  #reactorWrap{width:min(62vw,260px); height:min(62vw,260px)}
-  #coreState .st{font-size:12px; letter-spacing:4px}
-  #coreState .hint{font-size:8px}
-  #feed{max-height:34dvh; min-height:90px}
+  #hermesDock{flex-wrap:wrap}
+  #feed.open{max-height:34dvh}
   .col{order:2; overflow:visible; flex-shrink:0}
-  .col:last-of-type{order:3}
+  #colRight{order:3}
+  /* no HUD rotation on narrow screens — it costs more than it reads */
+  body.hud-banking .col{transform:none; filter:none}
   footer{order:4; flex-shrink:0; padding:6px 14px}
   #viewerBox{width:97%; height:94%}
   #approvals{width:94%}

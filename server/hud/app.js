@@ -125,6 +125,11 @@ function connect(){
       if(tm.response_text)addMsg("looking-glass",tm.response_text);
       setTimeout(()=>{if(state!=="listening")setState("standby","STANDBY")},400);
     }
+    // Extension point: any WS event type not handled above is dispatched to
+    // a global `onWsEvent_<type>` function if one exists, so new features
+    // (e.g. network-map.js's "network_activity" pulses) can hook into the
+    // socket without editing this router. See network-map.js for an example.
+    else if(typeof window["onWsEvent_"+e.type]==="function"){ window["onWsEvent_"+e.type](e); }
   };
 }
 connect();
@@ -226,12 +231,50 @@ async function toggleTalk(){
 $("talkBtn").onclick=toggleTalk;
 $("reactorWrap").onclick=toggleTalk;
 $("stopBtn").onclick=stopRun;
+$("feedToggleBtn").onclick=()=>feed.classList.toggle("open");
 
 /* ---- unified work-area tabs (terminals + views share one system) ---- */
 const DASH_PROXY=`https://${location.hostname}:9443`;
 const workTabs=new Map(); // id -> {type, title, term?, socket?, iframe?}
 
 function tabId(type,key){return `${type}:${key}`}
+
+/* ---- 3D view transition ----
+   Swings the work area (and banks the side columns) as if the camera turned
+   to a different display, running `swap` at the midpoint so the content
+   changes while it's edge-on. Used for opening/closing a view and toggling
+   the network map — NOT for switching between already-open tabs.
+   `swap` always runs exactly once even if a turn is already in flight, so a
+   fast double-click can never drop the action it was asked to perform. */
+let hudTurning=false;
+const TURN_OUT_MS=250, TURN_IN_MS=340;
+function hudTurn(swap,{reverse=false}={}){
+  const wa=$("work-area");
+  const reduced=matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if(hudTurning || !wa || reduced){ swap(); return; }
+  hudTurning=true;
+  document.body.classList.add("hud-banking");
+  wa.classList.toggle("rev",reverse);
+  wa.classList.add("turn-out");
+  setTimeout(()=>{
+    try{ swap(); }
+    finally{
+      wa.classList.remove("turn-out");
+      wa.classList.add("turn-in");
+      setTimeout(()=>{
+        wa.classList.remove("turn-in","rev");
+        document.body.classList.remove("hud-banking");
+        hudTurning=false;
+        // xterm/canvas can't measure themselves mid-rotation — re-fit now
+        // that the panel is square to the viewport again.
+        const active=document.querySelector(".work-panel.active");
+        const tab=active&&workTabs.get(active.dataset.tabId);
+        if(tab?.fitAddon)tab.fitAddon.fit();
+        if(tab?.onActivate)tab.onActivate();
+      },TURN_IN_MS);
+    }
+  },TURN_OUT_MS);
+}
 
 function updateWorkAreaVisibility(){
   $("work-area").classList.toggle("has-tabs",workTabs.size>0);
@@ -245,9 +288,18 @@ function activateWorkTab(id){
   // that .active makes it visible again)
   const tab=workTabs.get(id);
   if(tab?.fitAddon)tab.fitAddon.fit();
+  // Extension point: any work-tab type can set tab.onActivate (e.g. to
+  // resize a canvas that couldn't measure itself while hidden — same
+  // reason fitAddon.fit() above exists for terminals). See network-map.js.
+  if(tab?.onActivate)tab.onActivate();
 }
 
 function closeWorkTab(id){
+  if(!workTabs.has(id))return;
+  hudTurn(()=>closeWorkTabNow(id),{reverse:true});
+}
+
+function closeWorkTabNow(id){
   const tab=workTabs.get(id);
   if(!tab)return;
   if(tab.socket)tab.socket.close();
@@ -291,8 +343,16 @@ function openWorkTab(type,key,title,buildContent){
   return tab;
 }
 
+/* Opening something NEW turns the view; re-selecting a tab that's already
+   open is a plain instant switch. */
+function openWorkTabTurning(type,key,title,buildContent){
+  const id=tabId(type,key);
+  if(workTabs.has(id)){ activateWorkTab(id); return; }
+  hudTurn(()=>openWorkTab(type,key,title,buildContent));
+}
+
 function openView(name,path){
-  openWorkTab("view",path,name,(panel)=>{
+  openWorkTabTurning("view",path,name,(panel)=>{
     const iframe=document.createElement("iframe");
     iframe.className="work-view-iframe";
     iframe.src=DASH_PROXY+path;
@@ -302,7 +362,7 @@ function openView(name,path){
 }
 
 function openTerminal(host){
-  openWorkTab("terminal",host,host,(panel,tab)=>{
+  openWorkTabTurning("terminal",host,host,(panel,tab)=>{
     const term=new Terminal({convertEol:true, fontSize:13});
     const fitAddon=new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
@@ -330,6 +390,24 @@ addEventListener("resize",()=>{
 
 document.querySelectorAll(".terminal-tile").forEach(btn=>{
   btn.addEventListener("click",()=>openTerminal(btn.dataset.host));
+});
+
+/* Buttons are wired here rather than with inline onclick= attributes: a
+   Content-Security-Policy without 'unsafe-inline' blocks inline handlers, so
+   inline wiring would leave the theme toggle, the VIEWS buttons and the
+   network-map toggle silently dead. */
+document.querySelectorAll("[data-view]").forEach(btn=>{
+  btn.addEventListener("click",()=>openView(btn.dataset.view,btn.dataset.path));
+});
+document.querySelectorAll('[data-action="theme"]').forEach(btn=>{
+  btn.addEventListener("click",toggleTheme);
+});
+document.querySelectorAll('[data-action="netmap"]').forEach(btn=>{
+  // network-map.js loads after this file, so resolve the handler at click time.
+  btn.addEventListener("click",()=>{
+    if(typeof toggleNetworkMap==="function")toggleNetworkMap();
+    else addMsg("sys","network map unavailable (3D libraries failed to load)");
+  });
 });
 
 addEventListener("keydown",e=>{
@@ -362,87 +440,10 @@ $("sendBtn").onclick=sendChat;
 $("clearBtn").onclick=()=>{feed.innerHTML="";addMsg("sys","chat cleared (history stays in Hermes — type /new to reset the conversation)");};
 $("chatInput").addEventListener("keydown",e=>{if(e.key==="Enter")sendChat()});
 
-/* ============================== widgets ============================ */
-async function jget(path){const r=await fetch("/api/hermes"+path);if(!r.ok)throw new Error(r.status);return r.json()}
-async function refreshHealth(){
-  try{
-    const h=await jget("/health/detailed");
-    $("apiDot").className="dot on"; $("apiState").textContent="online";
-    const st=h.sessions||h.session_stats||{}; const rs=h.resources||{};
-    $("hSessions").textContent=st.active??st.total??"ok";
-    $("hAgents").textContent=h.running_agents??h.agents??"0";
-    $("hCpu").textContent=rs.cpu_percent!=null?rs.cpu_percent+"%":"—";
-    $("hMem").textContent=rs.memory_percent!=null?rs.memory_percent+"%":(rs.rss||"—");
-    $("hWhen").textContent=new Date().toTimeString().slice(0,8);
-  }catch{ $("apiDot").className="dot off"; $("apiState").textContent="offline"; }
-}
-async function refreshSkills(){
-  try{
-    const s=await jget("/v1/skills"); const list=Array.isArray(s)?s:(s.data||s.skills||[]);
-    $("skillCount").textContent=list.length;
-    $("skillsList").innerHTML=list.slice(0,14).map(x=>`<div>▸ ${x.name||x}</div>`).join("");
-  }catch{ $("skillCount").textContent="?"; }
-}
-async function refreshJobs(){
-  try{
-    const j=await jget("/api/jobs"); const list=Array.isArray(j)?j:(j.jobs||j.data||[]);
-    $("jobsList").innerHTML=list.length?list.slice(0,8).map(x=>
-      `<div>▸ ${x.name||x.prompt?.slice(0,38)||x.id} <span class="${x.paused?"warn":"ok"}">${x.paused?"paused":"on"}</span></div>`).join("")
-      :"<div>— none —</div>";
-  }catch{ $("jobsList").innerHTML="<div>—</div>"; }
-}
-async function refreshMachines(){
-  try{
-    const r=await fetch("/api/machines"); const j=await r.json();
-    $("machinesList").innerHTML=(j.machines||[]).map(m=>{
-      const bits=[];
-      if(m.cpu!=null)bits.push(`CPU ${Math.round(m.cpu)}%`);
-      if(m.mem!=null)bits.push(`MEM ${Math.round(m.mem)}%`);
-      if(m.gpu_util!=null)bits.push(`GPU ${Math.round(m.gpu_util)}%`);
-      if(m.vram_used!=null&&m.vram_total!=null)bits.push(`VRAM ${m.vram_used}/${m.vram_total}G`);
-      if(m.gpu_temp!=null)bits.push(`${m.gpu_temp}°`);
-      if(!bits.length&&m.note)bits.push(m.note);
-      return `<div class="kv"><span><span class="dot ${m.online?"on":"off"}"></span>${m.name}</span><b>${bits.join(" · ")||(m.online?"online":"offline")}</b></div>`;
-    }).join("");
-  }catch{ $("machinesList").innerHTML="<div class='kv'><span>unavailable</span></div>"; }
-}
-const fmtK=n=>n>=1e6?(n/1e6).toFixed(1)+"M":n>=1e3?(n/1e3).toFixed(1)+"k":String(n||0);
-async function refreshUsage(){
-  try{
-    const r=await fetch("/api/usage"); const j=await r.json();
-    const t=j.llm?.today||{};
-    $("uTok").textContent=`${fmtK(t.llm_in||0)} in / ${fmtK(t.llm_out||0)} out`;
-    $("uTurns").textContent=t.turns||0;
-    if(j.llm?.today_cost!=null){$("uCostRow").style.display="flex";$("uCost").textContent="$"+j.llm.today_cost.toFixed(2)}
-    const e=j.elevenlabs;
-    if(e&&e.limit){
-      const pct=Math.round(e.used/e.limit*100);
-      $("uTts").textContent=`${fmtK(e.used)} / ${fmtK(e.limit)} (${100-pct}% left)`;
-      $("ttsBar").style.width=pct+"%";
-      $("uTts").className=pct>90?"err":pct>70?"warn":"";
-    }else{
-      // quota API unavailable (key needs user_read permission) → local tally
-      $("uTts").textContent=fmtK(t.tts_chars||0)+" chars today";
-      $("ttsBar").style.width="0%";
-    }
-  }catch{}
-}
-async function refreshProjects(){
-  try{
-    const r=await fetch("/api/projects"); const j=await r.json();
-    $("projectsList").innerHTML=(j.projects||[]).map(p=>{
-      if(p.error)return `<div class="kv"><span><span class="dot off"></span>${p.name}</span><b>${p.error}</b></div>`;
-      const pct=p.total?Math.round(p.done/p.total*100):0;
-      return `<div class="kv"><span>${p.name}</span><b>${p.done}/${p.total}</b></div>
-        <div class="bar"><i style="width:${pct}%"></i></div>`;
-    }).join("")||"<div class='kv'><span>no projects configured</span></div>";
-  }catch{ $("projectsList").innerHTML="<div class='kv'><span>unavailable</span></div>"; }
-}
-
-refreshHealth();refreshSkills();refreshJobs();refreshMachines();refreshUsage();refreshProjects();
-setInterval(refreshUsage,60000);
-setInterval(refreshHealth,15000); setInterval(refreshJobs,60000); setInterval(refreshMachines,10000);
-setInterval(refreshSkills,120000); setInterval(refreshProjects,120000);
+/* Panel widgets (health/skills/jobs/machines/usage/projects) live in
+   panels.js now — see its top-of-file comment for the pattern to follow
+   when adding a new one. vLLM control lives in vllm-control.js. Network
+   topology map lives in network-map.js. */
 
 /* ====================== holographic media panels ==================== */
 function holoWhoosh(up=true){

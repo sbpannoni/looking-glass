@@ -12,10 +12,27 @@
 <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700&family=Rajdhani:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="styles.css">
 <link rel="stylesheet" href="vendor/xterm.css">
+<script type="importmap">
+{"imports":{"three":"./vendor/three.module.js"}}
+</script>
 <script src="vendor/xterm.js"></script>
 <script src="vendor/xterm-addon-fit.js"></script>
+<script src="vendor/3d-force-graph.min.js"></script>
+<script type="module" src="vendor-bootstrap.js"></script>
 </head>
 <body>
+<div id="bgDepth" aria-hidden="true"><div class="bgGrid"></div><div class="bgGlow g1"></div><div class="bgGlow g2"></div><div class="bgGlow g3"></div></div>
+<div id="netmapLayer" aria-hidden="true"></div>
+<div id="netmapControls" style="display:none">
+  <span class="netmap-title">◈ NETWORK</span>
+  <label><input type="checkbox" data-layer="physical" checked> physical</label>
+  <label><input type="checkbox" data-layer="general" checked> general</label>
+  <label><input type="checkbox" data-layer="hermes"> hermes</label>
+  <label><input type="checkbox" data-layer="claude"> claude</label>
+  <label class="netmap-zoom">zoom <input type="range" id="netmapZoom" min="0.3" max="3" step="0.05" value="1"></label>
+  <button class="btn" id="netmapRecenterBtn" style="padding:5px 10px; font-size:9px">⟲ RECENTER</button>
+</div>
+<div id="netmapInfo" style="display:none"></div>
 <div id="pinGate" style="display:none; position:fixed; inset:0; z-index:200; background:#020509f2;
   flex-direction:column; align-items:center; justify-content:center; gap:14px">
   <div style="font-family:'Orbitron'; font-size:18px; letter-spacing:8px; color:var(--cyan); text-shadow:0 0 20px #00e5ff88">ACCESS CODE</div>
@@ -34,11 +51,11 @@
     <h1>LOOKING GLASS</h1>
     <div class="sub">HERMES AGENT INTERFACE &nbsp;//&nbsp; <span id="connState">LINK DOWN</span></div>
     <div id="clock">--:--:--</div>
-    <button id="theme-toggle" onclick="toggleTheme()" aria-label="Toggle light/dark theme">🌓</button>
+    <button id="theme-toggle" data-action="theme" aria-label="Toggle light/dark theme">🌓</button>
   </header>
 
   <!-- LEFT COLUMN -->
-  <div class="col">
+  <div class="col" id="colLeft">
     <div class="panel"><h2><span>VOICE LINK</span><span class="num">01</span></h2>
       <div class="kv"><span><span class="dot" id="wsDot"></span>Socket</span><b id="wsState">offline</b></div>
       <div class="kv"><span><span class="dot" id="micDot"></span>Microphone</span><b id="micState">idle</b></div>
@@ -59,9 +76,10 @@
       <div class="kv"><span>Brain</span><b id="mBrain">—</b></div>
     </div>
     <div class="panel"><h2><span>VIEWS</span><span class="num">04</span></h2>
-      <button class="btn viewBtn" onclick="openView('KANBAN','/kanban')">▸ KANBAN BOARD</button>
-      <button class="btn viewBtn" onclick="openView('HERMES DASHBOARD','/')">▸ HERMES DASHBOARD</button>
-      <button class="btn viewBtn" onclick="openView('CHAT','/chat')">▸ DASHBOARD CHAT</button>
+      <button class="btn viewBtn" data-view="KANBAN" data-path="/kanban">▸ KANBAN BOARD</button>
+      <button class="btn viewBtn" data-view="HERMES DASHBOARD" data-path="/">▸ HERMES DASHBOARD</button>
+      <button class="btn viewBtn" data-view="CHAT" data-path="/chat">▸ DASHBOARD CHAT</button>
+      <button class="btn viewBtn" id="netmapToggleBtn" data-action="netmap">▸ NETWORK MAP</button>
     </div>
     <div class="panel"><h2><span>SESSION</span><span class="num">05</span></h2>
       <div class="kv"><span>Conversation</span><b>looking-glass-main</b></div>
@@ -71,27 +89,30 @@
     </div>
   </div>
 
-  <!-- CENTER -->
+  <!-- CENTER — a thin dock, not a wall: the moonscape/network map behind it
+       should stay the dominant thing on screen, not be blocked by a big
+       centered voice console. -->
   <div id="center">
     <div id="approvals"></div>
-    <div id="reactorWrap" title="Click to talk">
-      <div id="status-indicator" class="status-dot"></div>
-      <div id="coreState"><div class="st" id="stateLabel">STANDBY</div><div class="hint" id="stateHint">CLICK RING OR SPACE TO TALK</div></div>
-    </div>
     <div id="work-area">
       <div id="work-tabs"></div>
       <div id="work-content"></div>
     </div>
     <div id="feed"></div>
-    <div id="chatRow">
-      <input id="chatInput" placeholder="Type to Hermes… (/new resets · voice: click the ring)" autocomplete="off">
+    <div id="hermesDock">
+      <button class="dock-icon" id="feedToggleBtn" title="Toggle chat history">💬</button>
+      <div id="reactorWrap" title="Click to talk (STOP is on the VOICE LINK panel, or press Esc)">
+        <div id="status-indicator" class="status-dot"></div>
+        <div id="coreState"><div class="st" id="stateLabel">STANDBY</div><div class="hint" id="stateHint">CLICK OR SPACE TO TALK</div></div>
+      </div>
+      <input id="chatInput" placeholder="Type to Hermes… (/new resets)" autocomplete="off">
       <button class="btn" id="sendBtn">SEND</button>
       <button class="btn" id="clearBtn" title="Clear the visible chat (history stays in Hermes)">CLR</button>
     </div>
   </div>
 
   <!-- RIGHT COLUMN -->
-  <div class="col">
+  <div class="col" id="colRight">
     <div class="panel"><h2><span>MODELS LOADOUT</span><span class="num">06</span></h2>
       <div class="kv"><span>Brain</span><b>hermes-agent</b></div>
       <div class="kv"><span>STT</span><b>whisper base.en</b></div>
@@ -104,7 +125,7 @@
       <div class="kv"><span>11Labs quota</span><b id="uTts">—</b></div>
       <div class="bar"><i id="ttsBar"></i></div>
     </div>
-    <div class="panel"><h2><span>MACHINES</span><span class="num">07</span></h2>
+    <div class="panel accent-amber"><h2><span>MACHINES</span><span class="num">07</span></h2>
       <div id="machinesList"><div class="kv"><span>loading…</span></div></div>
     </div>
     <div class="panel"><h2><span>SKILLS</span><span class="num">08</span></h2>
@@ -120,7 +141,7 @@
     <div class="panel"><h2><span>AUTOMATIONS</span><span class="num">10</span></h2>
       <div id="jobsList"><div>—</div></div>
     </div>
-    <div class="panel"><h2><span>QUICK ACCESS</span><span class="num">11</span></h2>
+    <div class="panel accent-magenta"><h2><span>QUICK ACCESS</span><span class="num">11</span></h2>
       <div class="terminal-tiles">
         <button class="terminal-tile" data-host="snarf">snarf</button>
         <button class="terminal-tile" data-host="r720">r720</button>
@@ -134,17 +155,28 @@
     <div class="panel"><h2><span>PROJECTS</span><span class="num">12</span></h2>
       <div id="projectsList"><div class="kv"><span>loading…</span></div></div>
     </div>
+    <div class="panel accent-orange"><h2><span>VLLM / GPU BRAIN</span><span class="num">13</span></h2>
+      <div class="kv"><span><span class="dot" id="vllmDot"></span>snarf</span><b id="vllmState">—</b></div>
+      <div style="margin-top:8px; display:flex; gap:6px">
+        <button class="btn" id="vllmStartBtn" style="flex:1">START</button>
+        <button class="btn amber" id="vllmRestartBtn" style="flex:1">RESTART</button>
+        <button class="btn danger" id="vllmStopBtn" style="flex:1">STOP</button>
+      </div>
+    </div>
   </div>
 
   <div id="holoStage"></div>
 
   <footer>
-    <span></span>
+    <span id="buildStamp">BUILD 20260818-215205</span>
     <span id="footMsg">READY</span>
     <span>NOUS HERMES AGENT v0.16</span>
   </footer>
 </div>
 
 <script src="app.js"></script>
+<script src="panels.js"></script>
+<script src="vllm-control.js"></script>
+<script src="network-map.js"></script>
 </body>
 </html>

@@ -92,3 +92,40 @@ activity_feed:               # Hermes session + rack-host reachability feed (/ap
     - {name: beelink, address: 192.168.1.158, port: 22}
     - {name: claude-control, address: 192.168.1.157, port: 22}
     - {name: hermes, address: 192.168.1.159, port: 22}
+
+network_topology:            # fleet map for the NETWORK MAP panel (/api/network_topology).
+                              # Edit nodes/edges to match your own LAN — this example mirrors
+                              # a rack with a GPU box, a Proxmox host running a few LXCs, etc.
+  poll_seconds: 20
+  physical_groups:
+    - id: beelink
+      members: [beelink, claude-control, hermes, looking-glass]   # LXCs sharing one physical box
+  nodes:
+    - {id: snarf,          address: 192.168.1.239, kind: gpu-server, ports: [22, 8000, 9835, 9100]}
+    - {id: r720,           address: 192.168.1.61,  kind: server,     ports: [22]}
+    - {id: octominer,      address: 192.168.1.50,  kind: gpu-worker, ports: [22, 8767, 445]}
+    - {id: beelink,        address: 192.168.1.158, kind: proxmox,    ports: [22, 8006]}
+    - {id: claude-control, address: 192.168.1.157, kind: lxc,        ports: [22, 9090]}
+    - {id: hermes,         address: 192.168.1.159, kind: lxc,        ports: [22, 8642, 9119]}
+    - {id: looking-glass,  address: 192.168.1.241, kind: lxc,        ports: [22, 443, 8765]}
+    - {id: home-assistant, address: 192.168.1.160, kind: service,    ports: [8123]}
+    - {id: snarf-bmc,      address: 192.168.1.59,  kind: oob,        ports: [443]}
+    - {id: r720-idrac,     address: 192.168.1.60,  kind: oob,        ports: [443]}
+    - {id: pdu,            address: 192.168.1.58,  kind: oob,        ports: [80, 443]}
+  hermes_edges:               # what Hermes' agent process reaches outbound
+    - {to: snarf,          port: 8000, label: "vLLM inference"}
+    - {to: home-assistant, port: 8123, label: "HA toolset"}
+  claude_edges:                # mirrors TERMINAL_HOSTS below + known OOB reach
+    - {to: snarf, via: ssh}
+    - {to: r720, via: ssh}
+    - {to: octominer, via: ssh}
+    - {to: beelink, via: ssh}
+    - {to: claude-control, via: ssh}
+    - {to: hermes, via: ssh}
+    - {to: looking-glass, via: ssh}
+    - {to: snarf-bmc, via: ipmitool}
+    - {to: r720-idrac, via: ipmitool}
+
+vllm_control:                # GPU-brain start/stop panel (/api/vllm/status, /api/vllm/action)
+  host: snarf                       # key into TERMINAL_HOSTS (server.py) — reuses its SSH key/user
+  service: vllm-qwen36-27b.service

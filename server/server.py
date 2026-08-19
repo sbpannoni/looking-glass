@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import threading
 import time
 from dataclasses import dataclass, field
@@ -585,6 +586,8 @@ class VoicePipelineServer:
                     timing.tools_used.append(info.get("name", "tool"))
                     await ws.send_json({"type": "agent_status", "state": "tool_use",
                                         "tool": info.get("name"), "preview": info.get("preview", "")})
+                    matched = _match_topology_node(info.get("name"), info.get("preview"))
+                    await _broadcast_network_activity(matched or "hermes", "hermes", "pulse")
                     continue
                 if kind == "approval":
                     await ws.send_json({"type": "approval_request", "data": json.loads(value),
@@ -772,6 +775,23 @@ async def api_auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def hud_no_cache_middleware(request: Request, call_next):
+    """Force revalidation of HUD assets.
+
+    StaticFiles sends ETag + Last-Modified but no Cache-Control, so browsers
+    fall back to *heuristic* freshness (roughly 10% of the file's age) and can
+    keep serving a stale HUD for hours after a deploy — the HUD is edited in
+    place and usually left open on a long-lived tab, so this bit us. "no-cache"
+    means "revalidate before reuse", not "don't cache": unchanged files still
+    answer with a cheap 304 off the ETag StaticFiles already provides.
+    """
+    response = await call_next(request)
+    if request.url.path.startswith("/hud"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 def _ws_allowed(ws: WebSocket) -> bool:
     """Browsers send Origin (+cookie); native clients (PTT, tests) send neither."""
     origin = ws.headers.get("origin")
@@ -950,6 +970,18 @@ async def usage() -> JSONResponse:
 
 
 WS_CLIENTS: set = set()
+ACTIVE_TERMINALS: set[str] = set()   # hosts with a live /ws/terminal/{host} session right now
+
+
+async def _broadcast_network_activity(node: str, source: str, state: str) -> None:
+    """Pulse a node on the NETWORK MAP panel. source: "claude"|"hermes",
+    state: "start"|"end"|"pulse". Ephemeral — not logged to ACTIVITY_LOG."""
+    payload = {"type": "network_activity", "node": node, "source": source, "state": state}
+    for client in list(WS_CLIENTS):
+        try:
+            await client.send_json(payload)
+        except Exception:
+            WS_CLIENTS.discard(client)
 
 
 @app.post("/api/summon")
@@ -1229,6 +1261,93 @@ def _host_reachable(address: str, port: int) -> bool:
         return False
 
 
+# ------------------------------------------------------- network topology map
+
+def _topology_cfg() -> dict:
+    return CFG.get("network_topology") or {}
+
+
+NETWORK_TOPOLOGY_STATE: dict = {
+    "updated": 0.0, "nodes": [],
+    "edges": {"physical": [], "general": [], "hermes": [], "claude": []},
+}
+
+
+async def _probe_network_topology() -> None:
+    cfg = _topology_cfg()
+    nodes_cfg = cfg.get("nodes") or []
+    physical_groups = cfg.get("physical_groups") or []
+
+    async def probe_node(node: dict) -> dict:
+        address = node["address"]
+        ports = node.get("ports") or []
+        open_flags = await asyncio.gather(
+            *[asyncio.to_thread(_host_reachable, address, p) for p in ports]
+        )
+        group = next(
+            (g["id"] for g in physical_groups if node["id"] in (g.get("members") or [])),
+            None,
+        )
+        return {
+            "id": node["id"], "address": address, "kind": node.get("kind", "host"),
+            "up": any(open_flags), "physical_group": group,
+            "ports": [{"port": p, "open": o} for p, o in zip(ports, open_flags)],
+        }
+
+    nodes = list(await asyncio.gather(*[probe_node(n) for n in nodes_cfg]))
+    node_ids = {n["id"] for n in nodes}
+
+    physical_edges = [
+        {"from": g["id"], "to": member}
+        for g in physical_groups for member in (g.get("members") or [])
+        if member in node_ids and member != g["id"]
+    ]
+    general_edges = [{"from": "lan", "to": n["id"]} for n in nodes]
+    hermes_edges = [
+        {"from": "hermes", **e} for e in (cfg.get("hermes_edges") or []) if e.get("to") in node_ids
+    ]
+    claude_edges = [
+        {"from": "claude", **e} for e in (cfg.get("claude_edges") or []) if e.get("to") in node_ids
+    ]
+
+    NETWORK_TOPOLOGY_STATE.update({
+        "updated": time.time(),
+        "nodes": nodes,
+        "edges": {
+            "physical": physical_edges, "general": general_edges,
+            "hermes": hermes_edges, "claude": claude_edges,
+        },
+    })
+
+
+async def _poll_network_topology_forever() -> None:
+    while True:
+        try:
+            await _probe_network_topology()
+        except Exception:
+            pass
+        await asyncio.sleep(_topology_cfg().get("poll_seconds", 20))
+
+
+@app.get("/api/network_topology")
+async def network_topology() -> JSONResponse:
+    return JSONResponse(NETWORK_TOPOLOGY_STATE)
+
+
+def _match_topology_node(*texts: str) -> str | None:
+    """Best-effort match of a Hermes tool name/preview to a configured node,
+    for the network map's live-activity pulse. Simple substring heuristic —
+    good enough to show *something* moving; a tighter signal (Hermes emitting
+    structured host metadata per tool call) is the natural upgrade later."""
+    haystack = " ".join(t for t in texts if t).lower()
+    if not haystack:
+        return None
+    for node in (_topology_cfg().get("nodes") or []):
+        if node["id"].lower() in haystack or node.get("address", "") in haystack:
+            return node["id"]
+    return None
+
+
 _ACTIVITY_STARTED = False
 
 
@@ -1242,6 +1361,7 @@ async def start_activity_feed() -> None:
     _ACTIVITY_STARTED = True
     asyncio.get_running_loop().create_task(_poll_rack_hosts_forever())
     asyncio.get_running_loop().create_task(_poll_hermes_sessions_forever())
+    asyncio.get_running_loop().create_task(_poll_network_topology_forever())
 
 
 async def _poll_rack_hosts_forever() -> None:
@@ -1511,6 +1631,8 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
         return
     await ws.accept()
     target = TERMINAL_HOSTS[host]
+    ACTIVE_TERMINALS.add(host)
+    await _broadcast_network_activity(host, "claude", "start")
 
     try:
         async with asyncssh.connect(
@@ -1550,6 +1672,63 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
         except Exception:
             pass
         await ws.close(code=1011)
+    finally:
+        ACTIVE_TERMINALS.discard(host)
+        await _broadcast_network_activity(host, "claude", "end")
+
+
+# ---------------------------------------------------------------- vLLM control
+
+def _vllm_cfg() -> dict:
+    return CFG.get("vllm_control") or {}
+
+
+async def _vllm_ssh_exec(cmd: str) -> tuple[int, str]:
+    """One-shot SSH command against the configured vLLM host — same key/user
+    as the terminal panel (TERMINAL_HOSTS), just a single command instead of
+    an interactive shell."""
+    cfg = _vllm_cfg()
+    target = TERMINAL_HOSTS.get(cfg.get("host", "snarf"))
+    if not target:
+        raise RuntimeError(f"vllm_control.host {cfg.get('host')!r} is not a known terminal host")
+    async with asyncssh.connect(
+        target["host"], username=target["user"], client_keys=[TERMINAL_KEY_PATH],
+    ) as conn:
+        result = await conn.run(cmd, check=False)
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        return result.exit_status, output
+
+
+@app.get("/api/vllm/status")
+async def vllm_status() -> JSONResponse:
+    service = _vllm_cfg().get("service")
+    if not service:
+        return JSONResponse({"error": "vllm_control not configured"}, status_code=503)
+    try:
+        _, output = await _vllm_ssh_exec(f"systemctl is-active {shlex.quote(service)}")
+    except Exception as exc:
+        return JSONResponse({"active": "unknown", "error": str(exc)}, status_code=502)
+    state = output.splitlines()[0].strip() if output else "unknown"
+    return JSONResponse({"active": state, "service": service})
+
+
+_VLLM_ACTIONS = {"start", "stop", "restart"}
+
+
+@app.post("/api/vllm/action")
+async def vllm_action(request: Request) -> JSONResponse:
+    service = _vllm_cfg().get("service")
+    if not service:
+        return JSONResponse({"error": "vllm_control not configured"}, status_code=503)
+    body = await request.json()
+    action = body.get("action")
+    if action not in _VLLM_ACTIONS:
+        return JSONResponse({"error": f"action must be one of {sorted(_VLLM_ACTIONS)}"}, status_code=400)
+    try:
+        exit_status, output = await _vllm_ssh_exec(f"sudo systemctl {action} {shlex.quote(service)}")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    return JSONResponse({"ok": exit_status == 0, "action": action, "output": output[-2000:]})
 
 
 @app.websocket("/ws")
