@@ -144,9 +144,15 @@ async function refreshProjects(){
         ? `<span class="proj-node">${p.node}</span>` +
           (d && d.agent==="native" ? `<span class="proj-native">native ctx</span>` : "")
         : `<span class="proj-none">no local checkout</span>`;
-      if(p.error)return `<div class="kv proj-row"><span><span class="dot off"></span>${p.name}</span><b>${p.error}</b></div>`;
+      // Show the repo underneath only when the project name would not lead you to
+      // it — "server" lives at sbpannoni/snarf, which nobody guesses.
+      const base = (p.repo||"").split("/").pop();
+      const repoSub = (base && base.toLowerCase() !== p.name.toLowerCase())
+        ? `<div class="proj-repo">${p.repo}</div>` : "";
+      if(p.error)return `<div class="kv proj-row"><span><span class="dot off"></span>${p.name}${where}</span><b>${p.error}</b></div>${repoSub}`;
+      if(p.untracked)return `<div class="kv proj-row"><span>${p.name}${where}</span><b class="proj-untracked">no tracker</b></div>${repoSub}`;
       const pct=p.total?Math.round(p.done/p.total*100):0;
-      return `<div class="kv proj-row" title="${p.checkout||p.repo||""}"><span>${p.name}${where}</span><b>${p.done}/${p.total}</b></div>
+      return `<div class="kv proj-row" title="${p.checkout||p.repo||""}"><span>${p.name}${where}</span><b>${p.done}/${p.total}</b></div>${repoSub}
         <div class="bar"><i style="width:${pct}%"></i></div>`;
     }).join("")||"<div class='kv'><span>no projects configured</span></div>";
   }catch{ $("projectsList").innerHTML="<div class='kv'><span>unavailable</span></div>"; }

@@ -1352,6 +1352,13 @@ TRACKED_PROJECTS = [
      "node": None, "checkout": None},
     {"name": "server", "repo": "sbpannoni/snarf", "ref": "main", "path": "STATUS.md", "parser": "status_table",
      "node": "claude-control", "checkout": None, "domain": "infra"},
+    # No tracker file in these two. They still belong on the board — knowing where
+    # a repo lives and who has native context is useful without a TODO count, and
+    # omitting them made the list look like the whole fleet when it wasn't.
+    {"name": "looking-glass", "repo": "sbpannoni/looking-glass", "ref": "main", "path": None, "parser": None,
+     "node": "looking-glass", "checkout": "/opt/looking-glass", "domain": "hud"},
+    {"name": "claude-config", "repo": "sbpannoni/claude-config", "ref": "main", "path": None, "parser": None,
+     "node": "claude-control", "checkout": "/root/claude-config", "domain": "infra"},
 ]
 _STATUS_EMOJI = {"✅": "done", "🔄": "in_progress", "🚧": "blocked", "📋": "todo"}
 PROJECTS_CACHE: dict = {"ts": 0.0, "data": {}}
@@ -1411,6 +1418,10 @@ async def api_projects() -> JSONResponse:
             # you know which box to open a terminal on to work them.
             where = {"node": proj.get("node"), "checkout": proj.get("checkout"),
                      "repo": proj["repo"]}
+            if not proj.get("path"):
+                # Tracked for location only — no tracker file to count.
+                results.append({"name": proj["name"], "untracked": True, **where})
+                continue
             content = _fetch_github_file(proj["repo"], proj["ref"], proj["path"])
             if content is None:
                 results.append({"name": proj["name"], "error": "unreachable", **where})
