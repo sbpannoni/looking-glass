@@ -67,6 +67,12 @@ server:
   dashboard_proxy:           # TLS reverse proxy so the HUD can iframe the Hermes dashboard
     port: 9443
     target: http://127.0.0.1:9119
+    auth:                    # sign in to the dashboard server-side so the HUD
+                             # iframe never shows its login page. Credentials come
+                             # from the environment, never this file.
+      login_path: /auth/password-login
+      username_env: HERMES_DASHBOARD_USER
+      password_env: HERMES_DASHBOARD_PASSWORD
 
 security:
   hud_token_env: LOOKING_GLASS_HUD_TOKEN   # set in ~/.hermes/.env; unset = auth disabled

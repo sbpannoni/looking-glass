@@ -1485,21 +1485,92 @@ async def dash_ws_proxy(ws: WebSocket, path: str) -> None:
         pass
 
 
+# The dashboard's own sign-in, handled server-side so the HUD iframe never
+# shows a login page. Its auth cannot simply be turned off — `hermes dashboard
+# --insecure` became a no-op in the June 2026 hardening, and a non-loopback
+# bind always requires an auth provider. It is a session-cookie flow (HTTP
+# Basic is rejected), so the proxy signs in once, keeps the session cookie in
+# this server-side Session, and re-signs-in when it expires. The dashboard
+# credentials therefore stay on the server and never reach the browser —
+# the same principle already used for the Hermes API key.
+#
+# This is gated on the HUD token like everything else on the proxy: anyone
+# reaching it has already authenticated to Looking Glass.
+_DASH_SESSION = requests.Session()
+_DASH_LOGIN_LOCK = threading.Lock()
+
+
+def _dash_auth_cfg() -> dict:
+    return ((CFG.get("server") or {}).get("dashboard_proxy") or {}).get("auth") or {}
+
+
+def _dash_credentials() -> tuple[str, str] | None:
+    cfg = _dash_auth_cfg()
+    user = os.environ.get(cfg.get("username_env", "HERMES_DASHBOARD_USER"), "")
+    password = os.environ.get(cfg.get("password_env", "HERMES_DASHBOARD_PASSWORD"), "")
+    return (user, password) if user and password else None
+
+
+def _dash_needs_login(resp: requests.Response) -> bool:
+    if resp.status_code == 401:
+        return True
+    location = resp.headers.get("location", "")
+    return resp.is_redirect and "/login" in location
+
+
+def _dash_login() -> bool:
+    """Sign the proxy's session in. Returns True if a session cookie was set."""
+    creds = _dash_credentials()
+    if not creds:
+        return False
+    user, password = creds
+    cfg = _dash_auth_cfg()
+    login_path = cfg.get("login_path", "/auth/password-login")
+    # `provider` is required — the dashboard's own sign-in JS sends it from the
+    # form's data-provider attribute, and the endpoint 401s without it.
+    payload = {"provider": cfg.get("provider", "basic"),
+               "username": user, "password": password, "next": "/"}
+    try:
+        with _DASH_LOGIN_LOCK:
+            resp = _DASH_SESSION.post(
+                f"{_dash_target()}{login_path}", json=payload,
+                timeout=30, allow_redirects=False,
+            )
+        ok = resp.status_code < 400 and bool(_DASH_SESSION.cookies)
+        if not ok:
+            print(f"[dash-proxy] sign-in failed: HTTP {resp.status_code}", flush=True)
+        return ok
+    except Exception as exc:
+        print(f"[dash-proxy] sign-in error: {exc}", flush=True)
+        return False
+
+
 @dash_app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def dash_http_proxy(path: str, request: Request) -> Response:
     body = await request.body()
+    # The browser's own Cookie header is dropped: the dashboard session lives
+    # in _DASH_SESSION, and forwarding looking_glass_token upstream is noise.
     fwd_headers = {k: v for k, v in request.headers.items()
-                   if k.lower() not in ("host", "accept-encoding", "connection")}
+                   if k.lower() not in ("host", "accept-encoding", "connection", "cookie")}
 
     def do_request() -> requests.Response:
-        return requests.request(
+        return _DASH_SESSION.request(
             request.method, f"{_dash_target()}/{path}",
             params=dict(request.query_params), headers=fwd_headers,
             data=body if body else None, timeout=60, allow_redirects=False,
         )
 
     resp = await asyncio.to_thread(do_request)
+    # Session expired (or we have never signed in): sign in and retry once.
+    if _dash_needs_login(resp) and _dash_credentials():
+        if await asyncio.to_thread(_dash_login):
+            resp = await asyncio.to_thread(do_request)
+
     out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in _STRIP_HEADERS}
+    # Never hand the dashboard's session cookie to the browser — it is the
+    # proxy's, and the browser is already gated by the HUD token.
+    out_headers.pop("set-cookie", None)
+    out_headers.pop("Set-Cookie", None)
     return Response(content=resp.content, status_code=resp.status_code, headers=out_headers)
 
 
