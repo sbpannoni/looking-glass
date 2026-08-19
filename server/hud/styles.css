@@ -196,7 +196,8 @@ header .sub{font-size:12px; letter-spacing:3px; color:var(--txt-dim)}
 /* When the feed is living inside a work pane it should fill it, not be
    capped at the small docked height. */
 #feed.in-pane{max-height:none; height:100%; width:100%; overflow-y:auto; padding:10px}
-.hermes-pane{display:flex; flex-direction:column}
+.hermes-pane{min-height:0}
+.work-panel.active.hermes-pane{display:flex; flex-direction:column}
 button.btn{
   background:#0a2435; color:var(--cyan); border:1px solid var(--cyan-dim); padding:9px 16px;
   font-family:'Orbitron'; font-size:11px; letter-spacing:2px; cursor:pointer;
@@ -440,9 +441,21 @@ footer{
 .bar i{display:block; height:100%; background:linear-gradient(90deg,var(--cyan-dim),var(--cyan)); width:0%; transition:width .4s}
 
 /* ---- kanban board + task log panes ---- */
-.kanban-pane{display:flex; flex-direction:column; overflow:hidden}
+/* NOTE the .work-panel prefix: .work-panel.active{display:block} is two
+   classes, so a bare .kanban-pane/.tasklog-pane rule loses on specificity and
+   the pane never becomes a flex container. Without that, the log <pre> gets
+   no height constraint, grows to its full content height inside an
+   overflow:hidden panel, and the bottom is unreachable. min-height:0 is
+   required too, or a flex child refuses to shrink below its content. */
+/* Keep DISPLAY out of the base rule. .work-panel.active{display:block} beats a
+   single-class selector, but a rule that sets display:flex unconditionally
+   also defeats .work-panel{display:none} and leaves inactive panes visible —
+   the board rendered underneath the log. So: layout properties on the pane
+   class, display only on the .active combination. */
+.kanban-pane{overflow:hidden; min-height:0}
+.work-panel.active.kanban-pane{display:flex; flex-direction:column}
 .kb-head{font-family:'Orbitron'; font-size:9px; letter-spacing:2px; color:var(--txt-dim); padding:2px 2px 8px}
-.kb-list{flex:1; overflow-y:auto; display:grid; gap:6px; align-content:start}
+.kb-list{flex:1 1 auto; min-height:0; overflow-y:auto; display:grid; gap:6px; align-content:start}
 .kb-card{
   border:1px solid var(--line); border-radius:8px; padding:8px 10px; cursor:pointer;
   background:color-mix(in srgb, var(--panel) 70%, transparent); transition:border-color .15s ease;
@@ -454,9 +467,10 @@ footer{
 .kb-age{color:var(--txt-dim); font-size:10px}
 .kb-title{font-size:13px; margin:3px 0 2px}
 .kb-meta{font-size:10px; color:var(--txt-dim)}
-.tasklog-pane{display:flex; overflow:hidden}
+.tasklog-pane{overflow:hidden; min-height:0}
+.work-panel.active.tasklog-pane{display:flex}
 .kb-log{
-  flex:1; margin:0; overflow:auto; white-space:pre-wrap; word-break:break-word;
+  flex:1 1 auto; min-height:0; margin:0; overflow:auto; white-space:pre-wrap; word-break:break-word;
   font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; line-height:1.35;
   color:#cfe3ee; background:#04070d; border-radius:8px; padding:10px;
 }
