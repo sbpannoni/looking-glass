@@ -1247,6 +1247,48 @@ async def _push_activity_event(event: dict) -> None:
             WS_CLIENTS.discard(client)
 
 
+@app.get("/api/conversation")
+async def conversation_history(request: Request) -> JSONResponse:
+    """Message history for the HUD's shared Hermes session.
+
+    The HUD only ever showed messages from the current browser session, so a
+    reload (or opening the live pane) looked like an empty conversation even
+    though the session on Hermes had full history. Resolves the conversation
+    name to its session id the same way the voice path does, then reads
+    /api/sessions/{id}/messages.
+    """
+    hermes_cfg = CFG.get("hermes") or {}
+    conversation = request.query_params.get("conversation") or hermes_cfg.get(
+        "conversation", "looking-glass-main")
+    limit = min(int(request.query_params.get("limit", 60)), 200)
+    token = os.environ.get(hermes_cfg.get("api_key_env", "API_SERVER_KEY"))
+    base_url = hermes_cfg.get("base_url", "http://127.0.0.1:8642")
+    if not token:
+        return JSONResponse({"messages": [], "error": "no API key"}, status_code=503)
+    try:
+        session_id = await asyncio.to_thread(HERMES.get_session_id, conversation)
+        response = await asyncio.to_thread(
+            requests.get, f"{base_url}/api/sessions/{session_id}/messages",
+            headers={"Authorization": f"Bearer {token}"},
+            params={"limit": limit}, timeout=20,
+        )
+        response.raise_for_status()
+        rows = response.json().get("data", [])
+    except Exception as exc:
+        return JSONResponse({"messages": [], "error": str(exc)}, status_code=502)
+
+    messages = []
+    for row in rows:
+        role = row.get("role")
+        content = (row.get("content") or "").strip()
+        # tool/system rows carry no readable text for the transcript
+        if role not in ("user", "assistant") or not content:
+            continue
+        messages.append({"role": role, "content": content[:4000]})
+    return JSONResponse({"session_id": session_id, "conversation": conversation,
+                         "messages": messages})
+
+
 @app.get("/api/activity")
 async def activity() -> JSONResponse:
     return JSONResponse({"events": ACTIVITY_LOG[-50:]})

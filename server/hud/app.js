@@ -345,10 +345,28 @@ function updateWorkAreaVisibility(){
    stays fixed. Pinning is a layout operation, not a view change — it must
    not rotate the HUD. */
 let splitRightId=null;
+let sidebarsVisible=true;
+
+/* Sidebars are overlays, not fixed furniture: hidden they slide off-canvas
+   and the centre reclaims the full width; shown they float above it. */
+function setSidebars(visible){
+  sidebarsVisible=visible;
+  document.body.classList.toggle("sidebars-hidden", !visible);
+  const btn=$("sidebarToggleBtn");
+  if(btn){ btn.textContent = visible ? "▤" : "▥"; btn.title = visible ? "Hide side panels (S)" : "Show side panels (S)"; }
+  refitAllVisibleWorkTabs();
+}
+function toggleSidebars(){ setSidebars(!sidebarsVisible); }
 
 function applySplitLayout(){
   const content=$("work-content");
-  content.classList.toggle("split", !!splitRightId);
+  const nowSplit=!!splitRightId;
+  // Split view needs the width, so the side columns get out of the way. They
+  // become overlays you can summon with the ▤ button (or the S key) rather
+  // than being gone entirely.
+  if(nowSplit && !content.classList.contains("split")) setSidebars(false);
+  if(!nowSplit && content.classList.contains("split")) setSidebars(true);
+  content.classList.toggle("split", nowSplit);
   document.querySelectorAll(".work-panel").forEach(p=>{
     p.classList.toggle("split-right", p.dataset.tabId===splitRightId);
   });
@@ -501,6 +519,37 @@ function openView(name,path){
    #feed element into the panel rather than rendering a copy, so there is one
    source of truth and no second session. The dashboard's own /chat page
    cannot do this: it starts a fresh session unrelated to this one. */
+/* The feed only ever held messages from THIS browser session, so the live
+   pane looked empty even though the Hermes session had full history. Pulls
+   the real transcript and prepends it above whatever is already on screen. */
+let historyLoaded=false;
+async function loadConversationHistory(){
+  const feed=$("feed");
+  if(historyLoaded){ feed.scrollTop=feed.scrollHeight; return; }
+  try{
+    const r=await fetch(`/api/conversation?conversation=${encodeURIComponent(CONV)}&limit=60`);
+    const j=await r.json();
+    const msgs=j.messages||[];
+    if(!msgs.length){
+      addMsg("sys", j.error ? `history unavailable: ${j.error}` : "no earlier messages in this session");
+    }else{
+      const frag=document.createDocumentFragment();
+      msgs.forEach(m=>{
+        const d=document.createElement("div");
+        d.className="msg "+(m.role==="user"?"you":"looking-glass");
+        d.textContent=m.content;
+        frag.appendChild(d);
+      });
+      const marker=document.createElement("div");
+      marker.className="msg sys"; marker.textContent=`— ${msgs.length} earlier messages · session ${j.session_id||""} —`;
+      feed.insertBefore(frag, feed.firstChild);
+      feed.insertBefore(marker, feed.firstChild);
+    }
+    historyLoaded=true;
+  }catch(err){ addMsg("sys","history load failed: "+err.message); }
+  feed.scrollTop=feed.scrollHeight;
+}
+
 function openHermesChatPane(){
   openWorkTabTurning("hermes","live","HERMES (live)",(panel,tab)=>{
     const feed=$("feed");
@@ -509,8 +558,7 @@ function openHermesChatPane(){
     panel.classList.add("hermes-pane");
     panel.appendChild(feed);
     feed.classList.add("open","in-pane");
-    addMsg("sys","live session — same conversation as voice and the input bar below");
-    feed.scrollTop=feed.scrollHeight;
+    loadConversationHistory();
     tab.onBeforeClose=()=>{
       feed.classList.remove("in-pane");
       anchor.parentNode.insertBefore(feed,anchor);
@@ -563,6 +611,12 @@ document.querySelectorAll(".terminal-tile").forEach(btn=>{
    network-map toggle silently dead. */
 document.querySelectorAll("[data-view]").forEach(btn=>{
   btn.addEventListener("click",()=>openView(btn.dataset.view,btn.dataset.path));
+});
+document.querySelectorAll('[data-action="sidebars"]').forEach(btn=>{
+  btn.addEventListener("click",toggleSidebars);
+});
+addEventListener("keydown",e=>{
+  if((e.key==="s"||e.key==="S") && document.activeElement!==$("chatInput")) toggleSidebars();
 });
 document.querySelectorAll('[data-action="theme"]').forEach(btn=>{
   btn.addEventListener("click",toggleTheme);

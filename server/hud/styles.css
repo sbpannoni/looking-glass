@@ -79,6 +79,30 @@ body.netmap-on #bgDepth .bgGlow{opacity:.12; transition:opacity .6s}
   #netmapInfo{left:8px; right:8px; width:auto; top:auto; bottom:8px}
 }
 
+/* ---- sidebars as overlays ----
+   Hidden: they slide off-canvas and the centre column takes the full width.
+   Shown while hidden-by-default (i.e. summoned): they float ABOVE the centre
+   rather than pushing it, so toggling never reflows the work area. */
+/* Explicit column placement. Without it, taking .col out of flow (position:
+   fixed, when hidden) let the grid auto-place #center into column 1 — which
+   is 0px wide in the hidden state — collapsing the entire centre column. */
+#colLeft{grid-column:1}
+#center{grid-column:2}
+#colRight{grid-column:3}
+#grid{transition:grid-template-columns .28s ease}
+body.sidebars-hidden #grid{grid-template-columns:0 1fr 0}
+body.sidebars-hidden .col{
+  position:fixed; top:62px; bottom:34px; width:320px; z-index:30;
+  opacity:0; pointer-events:none; transition:transform .28s ease, opacity .28s ease;
+}
+body.sidebars-hidden #colLeft{left:8px; transform:translateX(-110%)}
+body.sidebars-hidden #colRight{right:8px; transform:translateX(110%)}
+#sidebarToggleBtn{
+  background:none; border:1px solid var(--line); border-radius:8px; color:var(--txt-dim);
+  width:30px; height:30px; cursor:pointer; font-size:13px; line-height:1; margin-right:6px;
+}
+#sidebarToggleBtn:hover{border-color:var(--magenta); color:var(--magenta)}
+
 #theme-toggle{
   background:none; border:1px solid var(--line); border-radius:8px; color:var(--txt-dim);
   width:30px; height:30px; cursor:pointer; font-size:14px; line-height:1;
