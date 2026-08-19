@@ -412,6 +412,9 @@ function closeWorkTab(id){
 function closeWorkTabNow(id){
   const tab=workTabs.get(id);
   if(!tab)return;
+  // Some tabs borrow live DOM (the Hermes pane moves the real chat feed into
+  // itself). Give them a chance to put it back before the panel is removed.
+  if(tab.onBeforeClose){ try{ tab.onBeforeClose(); }catch{} }
   if(splitRightId===id) splitRightId=null;
   if(tab.socket)tab.socket.close();
   if(tab.term)tab.term.dispose();
@@ -493,6 +496,29 @@ function openView(name,path){
   });
 }
 
+/* Shows the live looking-glass-main conversation in a pane — the same session
+   the voice pipeline and the dock input use. It does this by MOVING the real
+   #feed element into the panel rather than rendering a copy, so there is one
+   source of truth and no second session. The dashboard's own /chat page
+   cannot do this: it starts a fresh session unrelated to this one. */
+function openHermesChatPane(){
+  openWorkTabTurning("hermes","live","HERMES (live)",(panel,tab)=>{
+    const feed=$("feed");
+    const anchor=document.createComment("feed-home");
+    feed.parentNode.insertBefore(anchor,feed);
+    panel.classList.add("hermes-pane");
+    panel.appendChild(feed);
+    feed.classList.add("open","in-pane");
+    addMsg("sys","live session — same conversation as voice and the input bar below");
+    feed.scrollTop=feed.scrollHeight;
+    tab.onBeforeClose=()=>{
+      feed.classList.remove("in-pane");
+      anchor.parentNode.insertBefore(feed,anchor);
+      anchor.remove();
+    };
+  });
+}
+
 function openTerminal(host,{run=null,title=null}={}){
   openWorkTabTurning("terminal",host,title||host,(panel,tab)=>{
     const term=new Terminal({convertEol:true, fontSize:13});
@@ -540,6 +566,21 @@ document.querySelectorAll("[data-view]").forEach(btn=>{
 });
 document.querySelectorAll('[data-action="theme"]').forEach(btn=>{
   btn.addEventListener("click",toggleTheme);
+});
+document.querySelectorAll('[data-action="pair"]').forEach(btn=>{
+  // The review setup in one click: live Hermes on the left, Claude in the
+  // repo on the right, already split. Hunting for two buttons and then a
+  // pin control was too much to discover.
+  btn.addEventListener("click",()=>{
+    openHermesChatPane();
+    setTimeout(()=>{
+      openTerminal("snarf",{run:"cd /ssdpool/DARKHELIX && bash -lc claude",title:"claude · DARKHELIX"});
+      setTimeout(()=>{ if(!splitRightId) toggleSplit(tabId("terminal","snarf")); },900);
+    },700);
+  });
+});
+document.querySelectorAll('[data-action="hermes-live"]').forEach(btn=>{
+  btn.addEventListener("click",openHermesChatPane);
 });
 document.querySelectorAll('[data-action="claude"]').forEach(btn=>{
   // Opens Claude Code where the code and its context actually live — on
