@@ -710,7 +710,9 @@ function applyZoomSlider(val){
 function toggleNetworkMap(){
   // Delegates to the view model in app.js — showing/hiding the network is a
   // VIEW CHANGE (it rotates); adding a tab is not.
-  whenThreeReady(()=>switchView(netmapActive ? "work" : "map"));
+  // Drive off the view model, not netmapActive — two sources of truth for
+  // the same state is what let them diverge and wedge the toggle.
+  whenThreeReady(()=>switchView(currentView==="map" ? "work" : "map"));
 }
 
 /* The LANDSCAPE is permanent scenery — it is the HUD's background in every

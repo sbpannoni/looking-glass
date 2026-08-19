@@ -255,7 +255,11 @@ function tabId(type,key){return `${type}:${key}`}
    view change, which made no sense. Now a rotation happens only when the
    view actually changes.
 ------------------------------------------------------------------------ */
-let currentView="map";           // "map" | "work"
+// Starts as null, NOT "map". switchView() early-returns when the target
+// equals the current view, so seeding this with "map" made the startup
+// switchView("map") a no-op — setNetworkVisible(true) never ran and the
+// network could never appear, on any number of clicks.
+let currentView=null;            // null | "map" | "work"
 
 function switchView(next,{animate=true}={}){
   if(next===currentView){ return; }
