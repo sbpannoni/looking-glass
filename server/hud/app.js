@@ -239,6 +239,37 @@ const workTabs=new Map(); // id -> {type, title, term?, socket?, iframe?}
 
 function tabId(type,key){return `${type}:${key}`}
 
+/* ---- view model -------------------------------------------------------
+   Two distinct operations, which used to be conflated:
+
+     VIEW CHANGE   switching what the centre of the HUD is showing
+                   (the network map vs the work area). Rotates the HUD and
+                   swings the 3D camera with it.
+
+     TAB ADDITION  adding a terminal or page INSIDE the work view. Tabs are
+                   how one workspace organises itself, so they must not
+                   rotate anything — opening a second terminal is not a
+                   change of view.
+
+   Previously every openWorkTab() rotated, so adding a tab performed a full
+   view change, which made no sense. Now a rotation happens only when the
+   view actually changes.
+------------------------------------------------------------------------ */
+let currentView="map";           // "map" | "work"
+
+function switchView(next,{animate=true}={}){
+  if(next===currentView){ return; }
+  const reverse = next==="map";       // work->map swings back the other way
+  const apply=()=>{
+    currentView=next;
+    document.body.classList.toggle("view-work", next==="work");
+    document.body.classList.toggle("view-map",  next==="map");
+    if(typeof setNetworkVisible==="function") setNetworkVisible(next==="map");
+  };
+  if(!animate){ apply(); return; }
+  hudTurn(apply,{reverse});
+}
+
 /* ---- 3D view transition ----
    Swings the work area (and banks the side columns) as if the camera turned
    to a different display, running `swap` at the midpoint so the content
@@ -263,6 +294,8 @@ function hudTurn(swap,{reverse=false}={}){
   if(hudTurning || !wa || reduced){ swap(); return; }
   hudTurning=true;
   document.body.classList.add("hud-banking");
+  // The background is part of the move, not a static backdrop behind it.
+  if(typeof nudgeCameraForViewChange==="function") nudgeCameraForViewChange(reverse);
   wa.classList.toggle("rev",reverse);
   document.body.classList.toggle("turn-rev",reverse);
 
@@ -318,7 +351,11 @@ function activateWorkTab(id){
 
 function closeWorkTab(id){
   if(!workTabs.has(id))return;
-  hudTurn(()=>closeWorkTabNow(id),{reverse:true});
+  // Closing one of several tabs is a tab operation; closing the last one
+  // leaves the work view empty, so that IS a view change back to the map.
+  if(workTabs.size>1){ closeWorkTabNow(id); return; }
+  switchView("map");
+  setTimeout(()=>closeWorkTabNow(id), TURN_OUT_MS);
 }
 
 function closeWorkTabNow(id){
@@ -367,10 +404,23 @@ function openWorkTab(type,key,title,buildContent){
 
 /* Opening something NEW turns the view; re-selecting a tab that's already
    open is a plain instant switch. */
+/* Adding a tab is NOT a view change. It only rotates when it forces one —
+   i.e. when we are still on the map view and have to move to the work view
+   to show it. Once in the work view, further tabs just appear. */
 function openWorkTabTurning(type,key,title,buildContent){
   const id=tabId(type,key);
-  if(workTabs.has(id)){ activateWorkTab(id); return; }
-  hudTurn(()=>openWorkTab(type,key,title,buildContent));
+  if(workTabs.has(id)){ activateWorkTab(id); switchView("work"); return; }
+  if(currentView!=="work"){
+    hudTurn(()=>{
+      openWorkTab(type,key,title,buildContent);
+      currentView="work";
+      document.body.classList.add("view-work");
+      document.body.classList.remove("view-map");
+      if(typeof setNetworkVisible==="function") setNetworkVisible(false);
+    });
+  }else{
+    openWorkTab(type,key,title,buildContent);   // plain tab addition
+  }
 }
 
 function openView(name,path){

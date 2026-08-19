@@ -377,7 +377,10 @@ function linkColorFn(l){
 
 function applyData(){
   if(!graph) return;
-  graph.graphData(buildGraphData());
+  // Must respect the current view: the 15s topology poll calls this
+  // unconditionally, which previously repopulated the graph moments after a
+  // view change had deliberately cleared it, making hidden nodes reappear.
+  graph.graphData(netmapActive ? buildGraphData() : {nodes:[],links:[]});
   refreshAccessors();
 }
 
@@ -684,42 +687,58 @@ function applyZoomSlider(val){
 }
 
 function toggleNetworkMap(){
-  // Same camera-turn transition as opening/closing a view (hudTurn lives in
-  // app.js); reversed on hide so showing and hiding swing opposite ways.
-  // Showing waits for three.js so an early click cannot produce the black,
-  // terrain-less fallback either.
-  if(!netmapActive){
-    whenThreeReady(()=>hudTurn(()=>applyNetworkMapToggle(),{reverse:false}));
+  // Delegates to the view model in app.js — showing/hiding the network is a
+  // VIEW CHANGE (it rotates); adding a tab is not.
+  whenThreeReady(()=>switchView(netmapActive ? "work" : "map"));
+}
+
+/* The LANDSCAPE is permanent scenery — it is the HUD's background in every
+   view and is never torn down. Only the NETWORK (nodes, links, controls) is
+   a view, shown or hidden over it. Previously hiding the map destroyed the
+   whole 3D layer, which took the background with it. */
+function startLandscape(){
+  ensureGraph();
+  graph.resumeAnimation();
+  resizeGraph();
+  if(!idleSpin) tickIdle();
+}
+
+function setNetworkVisible(on){
+  netmapActive=on;
+  const btn=$("netmapToggleBtn");
+  if(btn) btn.textContent = on ? "▸ HIDE NETWORK" : "▸ NETWORK MAP";
+  $("netmapControls").style.display = on ? "flex" : "none";
+  document.body.classList.toggle("netmap-on", on);
+  if(!on) showNodeInfo(null);
+  if(!graph) return;
+  if(on){
+    autoFramed=false; zoomBaseDist=null;
+    applyData();
   }else{
-    hudTurn(()=>applyNetworkMapToggle(),{reverse:true});
+    // Empty the graph but keep the scene (and therefore the landscape)
+    // running. Node objects are cached on the node records, so re-showing
+    // restores their existing positions rather than re-randomising them.
+    graph.graphData({nodes:[],links:[]});
   }
 }
 
-function applyNetworkMapToggle(){
-  netmapActive=!netmapActive;
-  const btn=$("netmapToggleBtn");
-  if(netmapActive){
-    $("netmapLayer").classList.add("active");
-    $("netmapControls").style.display="flex";
-    document.body.classList.add("netmap-on");
-    if(btn)btn.textContent="▸ HIDE NETWORK MAP";
-    autoFramed=false;
-    zoomBaseDist=null;
-    ensureGraph();
-    graph.resumeAnimation();
-    resizeGraph();
-    applyData();
-    if(!idleSpin) tickIdle();
-  }else{
-    $("netmapLayer").classList.remove("active");
-    $("netmapControls").style.display="none";
-    showNodeInfo(null);
-    document.body.classList.remove("netmap-on");
-    if(btn)btn.textContent="▸ NETWORK MAP";
-    graph?.pauseAnimation();
-    if(idleSpin){ cancelAnimationFrame(idleSpin); idleSpin=null; }
-  }
-}
+/* Swing the 3D camera in step with a HUD view change, so the background
+   moves WITH the panels instead of sitting still behind them. */
+window.nudgeCameraForViewChange=function(reverse){
+  if(!graph || !window.THREE3D) return;
+  try{
+    const THREE=window.THREE3D;
+    const cam=graph.camera();
+    const target=(graph.controls&&graph.controls().target) || new THREE.Vector3(0,0,0);
+    const offset=cam.position.clone().sub(target);
+    offset.applyAxisAngle(new THREE.Vector3(0,1,0), (reverse?-1:1)*0.30);
+    graph.cameraPosition(
+      {x:target.x+offset.x, y:target.y+offset.y, z:target.z+offset.z},
+      target, 640,
+    );
+  }catch{}
+};
+window.setNetworkVisible=setNetworkVisible;
 
 document.querySelectorAll("#netmapControls input[type=checkbox]").forEach(cb=>{
   cb.addEventListener("change",()=>{ layers[cb.dataset.layer]=cb.checked; applyData(); });
@@ -754,4 +773,7 @@ function whenThreeReady(cb){
 // The map IS the HUD's backdrop, not an optional extra — it comes up with the
 // page rather than waiting for a click. Deliberately calls the plain toggle
 // (not hudTurn) so it doesn't fight the boot sequence's own animation.
-whenThreeReady(()=>{ if(!netmapActive) applyNetworkMapToggle(); });
+whenThreeReady(()=>{
+  startLandscape();               // scenery first — it outlives every view
+  switchView("map", {animate:false});
+});

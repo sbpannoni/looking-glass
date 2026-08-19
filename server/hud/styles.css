@@ -48,8 +48,10 @@ body.netmap-on #bgDepth .bgGrid{opacity:.08; transition:opacity .6s}
 body.netmap-on #bgDepth .bgGlow{opacity:.12; transition:opacity .6s}
 
 /* ---------------- network map (ambient, full-viewport, not a window) ---- */
-#netmapLayer{position:fixed; inset:0; z-index:-1; display:none}
-#netmapLayer.active{display:block}
+/* Permanent scenery: the 3D landscape is the HUD's background in EVERY
+   view. Only the network (nodes/links/controls) is toggled, not this layer —
+   hiding the whole layer used to take the background away with it. */
+#netmapLayer{position:fixed; inset:0; z-index:-1; display:block}
 #netmapLayer canvas{display:block}
 /* Both overlays are confined to the centre grid column (the side columns are
    320px + 8px gap + 8px padding = 336px), so they can never sit on top of the
@@ -392,3 +394,4 @@ footer{
 /* The netmap control bar is pinned to the top of the centre column, so make
    room for it rather than letting it sit on top of the work-area tab strip. */
 body.netmap-on #center{padding-top:44px}
+body.view-map #work-area{display:none !important}
