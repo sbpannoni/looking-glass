@@ -538,10 +538,16 @@ document.querySelectorAll('[data-action="theme"]').forEach(btn=>{
   btn.addEventListener("click",toggleTheme);
 });
 document.querySelectorAll('[data-action="claude"]').forEach(btn=>{
-  // Claude runs on claude-control; this opens a terminal there and launches
-  // it, so pinning it beside the Hermes chat gives the side-by-side review
-  // setup in two clicks.
-  btn.addEventListener("click",()=>openTerminal("claude-control",{run:"claude",title:"claude"}));
+  // Opens Claude Code where the code and its context actually live — on
+  // snarf, in the repo (which carries its own CLAUDE.md and .claude/), next
+  // to the already-authenticated gh. Host, directory and command come from
+  // the button's data-* attributes so this is not hardcoded here.
+  // `bash -lc` matters: claude sits in ~/.local/bin, which a non-login shell
+  // does not have on PATH.
+  btn.addEventListener("click",()=>openTerminal(btn.dataset.host||"snarf",{
+    run: btn.dataset.run || "claude",
+    title: btn.dataset.title || "claude",
+  }));
 });
 document.querySelectorAll('[data-action="netmap"]').forEach(btn=>{
   // network-map.js loads after this file, so resolve the handler at click time.
