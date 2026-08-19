@@ -463,7 +463,7 @@ function buildGridTile(THREE){
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
   const mat = new THREE.LineBasicMaterial({
-    color: PALETTE.cyan, transparent: true, opacity: 0.62,
+    color: PALETTE.cyan, transparent: true, opacity: 0.26,
   });
   return new THREE.LineSegments(geo, mat);
 }
@@ -493,11 +493,11 @@ function buildGridscape(THREE, scene){
   const sctx=sc.getContext("2d");
   const sg=sctx.createLinearGradient(0,0,0,512);
   sg.addColorStop(0.00,"#000000");           // zenith
-  sg.addColorStop(0.42,"#03000a");
-  sg.addColorStop(0.49,"#2a0730");           // glow builds toward the horizon
-  sg.addColorStop(0.50,"#5c1060");           // horizon line itself
-  sg.addColorStop(0.515,"#12103a");
-  sg.addColorStop(0.60,"#01030a");
+  sg.addColorStop(0.44,"#000000");           // hold deep space most of the way
+  sg.addColorStop(0.485,"#07020c");          // glow only in a narrow band
+  sg.addColorStop(0.50,"#15041b");           // horizon line itself
+  sg.addColorStop(0.515,"#04040f");
+  sg.addColorStop(0.57,"#000002");
   sg.addColorStop(1.00,"#000000");           // below the horizon
   sctx.fillStyle=sg; sctx.fillRect(0,0,8,512);
   const skyTex=new THREE.CanvasTexture(sc);
@@ -509,21 +509,42 @@ function buildGridscape(THREE, scene){
   sky.position.y=-430;
   scene.add(sky);
 
-  const starCount = 2600;
-  const positions = new Float32Array(starCount * 3);
-  for (let i = 0; i < starCount; i++){
-    const r = 3000 + Math.random() * 3000;
-    const theta = Math.random() * Math.PI * 2, phi = Math.acos(Math.random() * 0.9);
-    positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
-    positions[i * 3 + 1] = Math.abs(r * Math.cos(phi)) + 200;
-    positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  // Stars are drawn with a soft round sprite. A bare PointsMaterial renders
+  // each point as a hard square — at these sizes they read as pixel blocks,
+  // not stars. Three layers at different sizes/opacities also give the field
+  // some depth instead of one uniform dot size.
+  const starCanvas=document.createElement("canvas");
+  starCanvas.width=starCanvas.height=64;
+  const stx=starCanvas.getContext("2d");
+  const sgrad=stx.createRadialGradient(32,32,0,32,32,32);
+  sgrad.addColorStop(0.00,"rgba(255,255,255,1)");
+  sgrad.addColorStop(0.22,"rgba(255,255,255,0.85)");
+  sgrad.addColorStop(0.45,"rgba(190,215,255,0.28)");
+  sgrad.addColorStop(1.00,"rgba(190,215,255,0)");
+  stx.fillStyle=sgrad; stx.beginPath(); stx.arc(32,32,32,0,Math.PI*2); stx.fill();
+  const starSprite=new THREE.CanvasTexture(starCanvas);
+
+  const starLayers=[
+    {count:1500, size:2.4, opacity:0.42},
+    {count: 700, size:3.6, opacity:0.60},
+    {count: 220, size:5.4, opacity:0.85},
+  ];
+  for(const layer of starLayers){
+    const pos=new Float32Array(layer.count*3);
+    for(let i=0;i<layer.count;i++){
+      const r=3000+Math.random()*3000;
+      const theta=Math.random()*Math.PI*2, phi=Math.acos(Math.random()*0.9);
+      pos[i*3]   = r*Math.sin(phi)*Math.cos(theta);
+      pos[i*3+1] = Math.abs(r*Math.cos(phi))+200;
+      pos[i*3+2] = r*Math.sin(phi)*Math.sin(theta);
+    }
+    const g=new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.BufferAttribute(pos,3));
+    scene.add(new THREE.Points(g, new THREE.PointsMaterial({
+      map:starSprite, color:0xdfe9ff, size:layer.size, sizeAttenuation:false,
+      transparent:true, opacity:layer.opacity, depthWrite:false, fog:false,
+    })));
   }
-  const starGeo = new THREE.BufferGeometry();
-  starGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-  scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({
-    color: 0xcfe0ff, size: 2.2, sizeAttenuation: false,
-    transparent: true, opacity: 0.85, fog: false,
-  })));
 
   // Unlit scene — every material here is Basic, so no lights are needed and
   // nothing can be blown out by them (which is what washed the nodes white
