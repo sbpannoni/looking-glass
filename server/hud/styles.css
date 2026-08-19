@@ -485,3 +485,21 @@ footer{
    room for it rather than letting it sit on top of the work-area tab strip. */
 body.netmap-on #center{padding-top:44px}
 body.view-map #work-area{display:none !important}
+
+/* MACHINES rows: the fleet is now the real 11-node inventory, so each row needs
+   to say what kind of thing it is — LXC vs physical vs BMC. */
+.mach-kind{font-size:8px; letter-spacing:1px; text-transform:uppercase;
+  color:var(--txt-dim); border:1px solid var(--line); border-radius:2px;
+  padding:1px 4px; margin-left:6px; opacity:.75}
+.mach-row b{font-size:10px}
+/* Guests indent under the host whose hardware they share. The rule is the tree
+   connector, so the relationship reads at a glance rather than by inference. */
+.mach-row.mach-child > span:first-child{padding-left:14px; position:relative}
+.mach-row.mach-child > span:first-child::before{content:""; position:absolute;
+  left:4px; top:50%; width:6px; height:1px; background:var(--line)}
+.mach-row.mach-child > span:first-child::after{content:""; position:absolute;
+  left:4px; top:-6px; bottom:50%; width:1px; background:var(--line)}
+/* Deliberately-unprobed nodes: grey, dimmed. Never red — a false alarm in a
+   status panel is worse than no row at all. */
+.dot.na{background:var(--txt-dim); box-shadow:none; opacity:.5}
+.mach-row.mach-na{opacity:.55}

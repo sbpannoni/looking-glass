@@ -1058,63 +1058,169 @@ async def ha_call_service(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "result": response.json()})
 
 
-_WORKER_CACHE: dict = {"ts": 0.0, "data": [], "refreshing": False}
+_WORKER_CACHE: dict = {"ts": 0.0, "data": {}, "refreshing": False}
 
 
 @app.get("/api/machines")
 async def machines() -> JSONResponse:
-    """Local (Mac) stats + configured remote workers.
+    """The fleet, as actually probed.
 
-    Worker polls can take seconds when a worker is offline, so they run in a
-    background refresh; the endpoint always answers instantly from cache.
+    Sourced from NETWORK_TOPOLOGY_STATE rather than a second hand-maintained
+    list: that poller already probes every node's ports concurrently every
+    `network_topology.poll_seconds`, so this endpoint adds no I/O of its own and
+    can never disagree with the network map about who is up.
+
+    Enrichment, best-effort and never fatal:
+      * this host        -> psutil (we are the looking-glass node)
+      * `machines:` entry with a stats_url -> that worker's own stats agent
+      * snarf            -> GPU temp / CPU load from the rack_health cache
     """
-    result: list[dict] = []
-    mac: dict = {"name": "MAC MINI · HERMES", "online": True}
-    if psutil:
-        mac.update({
-            "cpu": psutil.cpu_percent(interval=0.1),
-            "mem": psutil.virtual_memory().percent,
-            "disk": psutil.disk_usage(str(ROOT)).percent,
-        })
-    result.append(mac)
+    topo_nodes = list(NETWORK_TOPOLOGY_STATE.get("nodes") or [])
+    if not topo_nodes:
+        return JSONResponse({"machines": [], "note": "topology not probed yet"})
+
+    # Worker stats agents are keyed by host address so a config entry can enrich
+    # whichever topology node it points at, regardless of what it is named.
+    workers_by_addr = {
+        str(w.get("host")): w for w in (CFG.get("machines") or []) if w.get("host")
+    }
 
     def poll_worker(w: dict) -> dict:
-        info = {"name": w.get("name", w.get("host", "worker")), "online": False}
         url = w.get("stats_url")
-        if url:
-            try:
-                r = requests.get(url, timeout=2)
-                if r.ok:
-                    info.update(r.json())
-                    info["online"] = True
-                    return info
-            except Exception:
-                pass
-        import socket
+        if not url:
+            return {}
         try:
-            with socket.create_connection((w.get("host"), int(w.get("ping_port", 445))), timeout=1.5):
-                info["online"] = True
-                info["note"] = "online (no stats agent)"
+            r = requests.get(url, timeout=2)
+            if r.ok:
+                return r.json()
         except Exception:
             pass
-        return info
+        return {}
 
-    workers = CFG.get("machines") or []
     now = time.time()
-    if workers and now - _WORKER_CACHE["ts"] > 10 and not _WORKER_CACHE["refreshing"]:
+    if workers_by_addr and now - _WORKER_CACHE["ts"] > 10 and not _WORKER_CACHE["refreshing"]:
         _WORKER_CACHE["refreshing"] = True
 
         async def refresh() -> None:
             try:
-                data = [await asyncio.to_thread(poll_worker, w) for w in workers]
+                data = {
+                    addr: await asyncio.to_thread(poll_worker, w)
+                    for addr, w in workers_by_addr.items()
+                }
                 _WORKER_CACHE.update(ts=time.time(), data=data)
             finally:
                 _WORKER_CACHE["refreshing"] = False
 
         asyncio.get_running_loop().create_task(refresh())
-    result.extend(_WORKER_CACHE["data"] or
-                  [{"name": w.get("name", "worker"), "online": False, "note": "checking..."} for w in workers])
-    return JSONResponse({"machines": result})
+    worker_stats = _WORKER_CACHE["data"] or {}
+
+    # Warm the rack_health cache ourselves. It used to be read only if already
+    # populated, but nothing in the HUD calls /api/rack_health, so "opportunistic"
+    # meant "never" and snarf only ever showed bare "online". Refresh in the background so
+    # the request still answers instantly from whatever is cached.
+    if now - RACK_HEALTH_CACHE["ts"] > 30 and not RACK_HEALTH_CACHE.get("refreshing"):
+        RACK_HEALTH_CACHE["refreshing"] = True
+
+        async def warm_rack() -> None:
+            try:
+                rh_cfg = CFG.get("rack_health") or {}
+                prom_url = rh_cfg.get("prometheus_url", "http://192.168.1.157:9090")
+                queries = rh_cfg.get("queries") or {}
+
+                def fetch() -> dict:
+                    out: dict = {}
+                    for name, promql in queries.items():
+                        try:
+                            out[name] = [
+                                {"labels": r["metric"], "value": float(r["value"][1])}
+                                for r in _prometheus_query(prom_url, promql)
+                            ]
+                        except Exception:
+                            pass
+                    return out
+
+                RACK_HEALTH_CACHE.update(ts=time.time(), data=await asyncio.to_thread(fetch))
+            finally:
+                RACK_HEALTH_CACHE["refreshing"] = False
+
+        asyncio.get_running_loop().create_task(warm_rack())
+    rack = RACK_HEALTH_CACHE["data"] or {}
+
+    def _rack_value(key: str) -> float | None:
+        series = rack.get(key)
+        if isinstance(series, list) and series:
+            return series[0].get("value")
+        return None
+
+    # Physical hosts first, then containers, then services and out-of-band. The
+    # OOB rows earn their place: a BMC that answers while its host is dark is
+    # exactly how a mains cut is told apart from a machine that crashed.
+    order = {"gpu-server": 0, "server": 1, "gpu-worker": 2, "proxmox": 3,
+             "lxc": 4, "service": 5, "oob": 6}
+
+    # Guests follow their host. A physical_group's id is also a node id (the
+    # mini-PC itself), so the parent is the member whose id == the group id;
+    # everything else in that group is a guest and gets indented under it.
+    by_id = {n["id"]: n for n in topo_nodes}
+    children: dict[str, list[dict]] = {}
+    for node in topo_nodes:
+        group = node.get("physical_group")
+        if group and group != node["id"] and group in by_id:
+            children.setdefault(group, []).append(node)
+
+    nested = {n["id"] for kids in children.values() for n in kids}
+    ordered: list[tuple[dict, int]] = []
+    for node in sorted(topo_nodes, key=lambda n: (order.get(n.get("kind"), 9), n["id"])):
+        if node["id"] in nested:
+            continue                      # emitted beneath its host instead
+        ordered.append((node, 0))
+        for kid in sorted(children.get(node["id"], []),
+                          key=lambda n: (order.get(n.get("kind"), 9), n["id"])):
+            ordered.append((kid, 1))
+
+    result: list[dict] = []
+    for node, depth in ordered:
+        info: dict = {
+            "name": node["id"].upper().replace("-", " "),
+            "kind": node.get("kind", "host"),
+            "address": node.get("address"),
+            "online": bool(node.get("up")),
+            "depth": depth,
+            "physical_group": node.get("physical_group"),
+        }
+
+        if node["id"] == "looking-glass" and psutil:
+            info.update({
+                "cpu": psutil.cpu_percent(interval=0.1),
+                "mem": psutil.virtual_memory().percent,
+                "disk": psutil.disk_usage(str(ROOT)).percent,
+            })
+        elif node["id"] == "snarf":
+            temp = _rack_value("snarf_gpu_temp_c")
+            load = _rack_value("snarf_cpu_load1")
+            if temp is not None:
+                info["gpu_temp"] = round(temp)
+            if load is not None:
+                info["load1"] = round(load, 2)
+        elif node["id"] == "beelink":
+            load = _rack_value("beelink_cpu_load1")
+            if load is not None:
+                info["load1"] = round(load, 2)
+
+        stats = worker_stats.get(str(node.get("address")))
+        if stats:
+            info.update(stats)
+
+        if not node.get("monitored", True):
+            # Not a fault: nothing is asking. Reported separately from up/down so
+            # a deliberately dark box never reads as an outage.
+            info["monitored"] = False
+            info["note"] = "not monitored"
+        elif not info["online"]:
+            info["note"] = "offline"
+        result.append(info)
+
+    return JSONResponse({"machines": result, "updated": NETWORK_TOPOLOGY_STATE.get("updated")})
 
 
 RACK_HEALTH_CACHE: dict = {"ts": 0.0, "data": {}}
@@ -1156,6 +1262,41 @@ async def rack_health() -> JSONResponse:
 
     data = await asyncio.to_thread(fetch_all)
     RACK_HEALTH_CACHE.update(ts=now, data=data)
+    return JSONResponse(data)
+
+
+BRAIN_CACHE: dict = {"ts": 0.0, "data": {}}
+
+
+@app.get("/api/brain")
+async def brain() -> JSONResponse:
+    """What model Hermes is actually thinking with.
+
+    The served model name exists only in vLLM's unit file on snarf; the Hermes
+    dashboard just proxies the gateway and never sees it, which is why nothing
+    in the stack could answer "which model is this?". Ask vLLM directly.
+    """
+    now = time.time()
+    if now - BRAIN_CACHE["ts"] < 60:
+        return JSONResponse(BRAIN_CACHE["data"])
+
+    url = (CFG.get("brain") or {}).get("models_url", "http://192.168.1.239:8000/v1/models")
+
+    def fetch() -> dict:
+        try:
+            r = requests.get(url, timeout=3)
+            r.raise_for_status()
+            entry = (r.json().get("data") or [{}])[0]
+            return {
+                "model": entry.get("id"),
+                "max_model_len": entry.get("max_model_len"),
+                "online": True,
+            }
+        except Exception as exc:
+            return {"model": None, "online": False, "error": str(exc)}
+
+    data = await asyncio.to_thread(fetch)
+    BRAIN_CACHE.update(ts=now, data=data)
     return JSONResponse(data)
 
 
@@ -1386,6 +1527,7 @@ async def _probe_network_topology() -> None:
         return {
             "id": node["id"], "address": address, "kind": node.get("kind", "host"),
             "up": any(open_flags), "physical_group": group,
+            "monitored": node.get("monitored", True),
             "ports": [{"port": p, "open": o} for p, o in zip(ports, open_flags)],
         }
 

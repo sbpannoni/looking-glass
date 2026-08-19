@@ -56,15 +56,30 @@ async function refreshJobs(){
 async function refreshMachines(){
   try{
     const r=await fetch("/api/machines"); const j=await r.json();
-    $("machinesList").innerHTML=(j.machines||[]).map(m=>{
+    const rows=(j.machines||[]);
+    if(!rows.length){ $("machinesList").innerHTML="<div class='kv'><span>probing…</span></div>"; return; }
+    $("machinesList").innerHTML=rows.map(m=>{
       const bits=[];
       if(m.cpu!=null)bits.push(`CPU ${Math.round(m.cpu)}%`);
+      if(m.load1!=null)bits.push(`load ${m.load1}`);
       if(m.mem!=null)bits.push(`MEM ${Math.round(m.mem)}%`);
       if(m.gpu_util!=null)bits.push(`GPU ${Math.round(m.gpu_util)}%`);
       if(m.vram_used!=null&&m.vram_total!=null)bits.push(`VRAM ${m.vram_used}/${m.vram_total}G`);
       if(m.gpu_temp!=null)bits.push(`${m.gpu_temp}°`);
       if(!bits.length&&m.note)bits.push(m.note);
-      return `<div class="kv"><span><span class="dot ${m.online?"on":"off"}"></span>${m.name}</span><b>${bits.join(" · ")||(m.online?"online":"offline")}</b></div>`;
+      // kind is the useful disambiguator here — three of these rows are LXCs on
+      // one mini-PC, and two are BMCs that stay up when their host is dark.
+      const kind=m.kind?`<span class="mach-kind">${m.kind}</span>`:"";
+      // depth 1 = a guest on the row above it (the LXCs sharing beelink's
+      // hardware). Indenting makes the blast radius obvious: beelink going down
+      // takes the three rows beneath it with it.
+      const child=m.depth?" mach-child":"";
+      // A node we deliberately don't probe is neither green nor red — a red dot
+      // there is a false alarm that trains you to ignore red dots.
+      const dot=m.monitored===false?"na":(m.online?"on":"off");
+      return `<div class="kv mach-row${child}${m.monitored===false?" mach-na":""}" title="${m.address||""}">`+
+             `<span><span class="dot ${dot}"></span>${m.name}${kind}</span>`+
+             `<b>${bits.join(" · ")||(m.online?"online":"offline")}</b></div>`;
     }).join("");
   }catch{ $("machinesList").innerHTML="<div class='kv'><span>unavailable</span></div>"; }
 }
@@ -103,6 +118,17 @@ async function refreshProjects(){
 
 registerPanel({id:"health",    refresh:refreshHealth,   intervalMs:15000});
 registerPanel({id:"jobs",      refresh:refreshJobs,     intervalMs:60000});
+async function refreshBrain(){
+  try{
+    const r=await fetch("/api/brain"); const j=await r.json();
+    const el=document.getElementById("mBrainModel"); if(!el) return;
+    if(j.model){
+      const ctx=j.max_model_len?` · ${Math.round(j.max_model_len/1024)}k ctx`:"";
+      el.textContent=j.model+ctx; el.className="";
+    }else{ el.textContent="offline"; el.className="err"; }
+  }catch{}
+}
+registerPanel({id:"brain", refresh:refreshBrain, intervalMs:60000});
 registerPanel({id:"machines",  refresh:refreshMachines, intervalMs:10000});
 registerPanel({id:"skills",    refresh:refreshSkills,   intervalMs:120000});
 registerPanel({id:"projects",  refresh:refreshProjects, intervalMs:120000});

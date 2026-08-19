@@ -117,7 +117,9 @@ network_topology:            # fleet map for the NETWORK MAP panel (/api/network
     - {id: home-assistant, address: 192.168.1.160, kind: service,    ports: [8123]}
     - {id: snarf-bmc,      address: 192.168.1.59,  kind: oob,        ports: [443]}
     - {id: r720-idrac,     address: 192.168.1.60,  kind: oob,        ports: [443]}
-    - {id: pdu,            address: 192.168.1.58,  kind: oob,        ports: [80, 443]}
+    # `monitored: false` keeps a node on the map but never counts it as a fault —
+    # for boxes that are deliberately dark (this PDU is unplugged from the network).
+    - {id: pdu,            address: 192.168.1.58,  kind: oob,        ports: [80, 443], monitored: false}
   hermes_edges:               # what Hermes' agent process reaches outbound
     - {to: snarf,          port: 8000, label: "vLLM inference"}
     - {to: home-assistant, port: 8123, label: "HA toolset"}

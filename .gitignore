@@ -24,3 +24,6 @@ nohup.out
 
 # self-signed cert exported for per-device browser trust (host-specific)
 server/hud/jarvis.cer
+
+# Piper TTS voices (296MB of .onnx) — downloaded at setup, never committed
+server/models/
