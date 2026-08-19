@@ -15,6 +15,8 @@ Options:
     --wait SECONDS        settle time before the shot (default 8)
     --click SELECTOR      click an element, then wait; repeatable
     --url URL             default https://127.0.0.1/hud/
+    --throttle KBPS       emulate a slow network (catches load-order races,
+                          e.g. code that runs before deferred modules land)
 
 The HUD token comes from $LOOKING_GLASS_HUD_TOKEN, or /etc/looking-glass/env.
 It is set as a cookie so the PIN gate doesn't cover the page. Never hardcode
@@ -58,6 +60,7 @@ def main() -> int:
     args = sys.argv[2:]
     width, height, wait_s, clicks = 1920, 1080, 8.0, []
     url = "https://127.0.0.1/hud/"
+    throttle_kbps = 0.0
 
     # Single pass. A flag's VALUE must never be mistaken for a positional —
     # collecting "every arg not starting with --" swallowed '#netmapToggleBtn'
@@ -71,6 +74,8 @@ def main() -> int:
             clicks.append(args[i + 1]); i += 2
         elif args[i] == "--url":
             url = args[i + 1]; i += 2
+        elif args[i] == "--throttle":
+            throttle_kbps = float(args[i + 1]); i += 2
         elif args[i].startswith("--"):
             i += 1
         else:
@@ -147,6 +152,12 @@ def main() -> int:
         send("Network.setCookie", {
             "name": "looking_glass_token", "value": token,
             "domain": urlparse(url).hostname or "127.0.0.1", "path": "/", "secure": True,
+        })
+    if throttle_kbps:
+        bps = throttle_kbps * 1024 / 8
+        send("Network.emulateNetworkConditions", {
+            "offline": False, "latency": 150,
+            "downloadThroughput": bps, "uploadThroughput": bps,
         })
     send("Page.navigate", {"url": url})
     pump(wait_s)

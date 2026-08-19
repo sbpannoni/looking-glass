@@ -18,3 +18,10 @@ import {UnrealBloomPass} from "./vendor/three-addons/postprocessing/UnrealBloomP
 
 window.THREE3D = THREE;
 window.THREE_POSTFX = {EffectComposer, RenderPass, UnrealBloomPass};
+
+// This file is a MODULE, so it is deferred and its 1.3MB of three.js loads
+// asynchronously — anything depending on window.THREE3D must wait for this
+// signal rather than a timer. Firing on a fixed delay meant the map could
+// activate before three.js existed, silently fall back to no-terrain
+// rendering, and look like an empty black background.
+window.dispatchEvent(new Event("three3d-ready"));

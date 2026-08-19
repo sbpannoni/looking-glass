@@ -686,7 +686,13 @@ function applyZoomSlider(val){
 function toggleNetworkMap(){
   // Same camera-turn transition as opening/closing a view (hudTurn lives in
   // app.js); reversed on hide so showing and hiding swing opposite ways.
-  hudTurn(()=>applyNetworkMapToggle(),{reverse:netmapActive});
+  // Showing waits for three.js so an early click cannot produce the black,
+  // terrain-less fallback either.
+  if(!netmapActive){
+    whenThreeReady(()=>hudTurn(()=>applyNetworkMapToggle(),{reverse:false}));
+  }else{
+    hudTurn(()=>applyNetworkMapToggle(),{reverse:true});
+  }
 }
 
 function applyNetworkMapToggle(){
@@ -729,12 +735,23 @@ addEventListener("resize",()=>{ if(netmapActive) resizeGraph(); });
 pollTopology();
 setInterval(pollTopology,15000);
 
+/* three.js arrives asynchronously (see vendor-bootstrap.js). Anything that
+   builds the 3D scene must wait for it, or it renders a terrain-less black
+   void. Listens for the ready event and also polls, in case the event fired
+   before this listener was attached; gives up after 20s and launches
+   degraded rather than never launching at all. */
+function whenThreeReady(cb){
+  if(window.THREE3D){ cb(); return; }
+  let fired=false;
+  const go=()=>{ if(!fired){ fired=true; cb(); } };
+  addEventListener("three3d-ready", go, {once:true});
+  const started=Date.now();
+  const poll=setInterval(()=>{
+    if(window.THREE3D || Date.now()-started>20000){ clearInterval(poll); go(); }
+  },80);
+}
+
 // The map IS the HUD's backdrop, not an optional extra — it comes up with the
 // page rather than waiting for a click. Deliberately calls the plain toggle
 // (not hudTurn) so it doesn't fight the boot sequence's own animation.
-addEventListener("DOMContentLoaded",()=>{
-  setTimeout(()=>{ if(!netmapActive) applyNetworkMapToggle(); },400);
-});
-if(document.readyState!=="loading"){
-  setTimeout(()=>{ if(!netmapActive) applyNetworkMapToggle(); },400);
-}
+whenThreeReady(()=>{ if(!netmapActive) applyNetworkMapToggle(); });
