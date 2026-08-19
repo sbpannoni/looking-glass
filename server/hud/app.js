@@ -452,6 +452,7 @@ function closeWorkTabNow(id){
   // itself). Give them a chance to put it back before the panel is removed.
   if(tab.onBeforeClose){ try{ tab.onBeforeClose(); }catch{} }
   if(splitRightId===id) splitRightId=null;
+  if(tab.resizeObserver){ try{ tab.resizeObserver.disconnect(); }catch{} }
   if(tab.socket)tab.socket.close();
   if(tab.term)tab.term.dispose();
   document.querySelector(`.work-tab[data-tab-id="${id}"]`)?.remove();
@@ -605,6 +606,24 @@ function openTerminal(host,{run=null,title=null}={}){
     socket.onclose=()=>term.write("\r\n[connection closed]\r\n");
     term.onData(data=>{if(socket.readyState===WebSocket.OPEN)socket.send(data)});
     tab.term=term; tab.socket=socket; tab.fitAddon=fitAddon;
+
+    // Refit whenever the panel ACTUALLY changes size, rather than guessing
+    // when. Sidebar hide/show and split view are 0.28s CSS transitions, so a
+    // refit fired immediately (or on the next frame) measures a mid-animation
+    // box and xterm locks in the wrong row count — leaving rows stranded
+    // below the fold, unreachable because .work-panel is overflow:hidden.
+    if(window.ResizeObserver){
+      let pending=null;
+      const ro=new ResizeObserver(()=>{
+        clearTimeout(pending);
+        pending=setTimeout(()=>{
+          const r=panel.getBoundingClientRect();
+          if(r.width>0 && r.height>0){ try{ fitAddon.fit(); }catch{} }
+        },60);
+      });
+      ro.observe(panel);
+      tab.resizeObserver=ro;
+    }
   });
 }
 
