@@ -126,6 +126,27 @@ network_topology:            # fleet map for the NETWORK MAP panel (/api/network
     - {to: snarf-bmc, via: ipmitool}
     - {to: r720-idrac, via: ipmitool}
 
-vllm_control:                # GPU-brain start/stop panel (/api/vllm/status, /api/vllm/action)
-  host: snarf                       # key into TERMINAL_HOSTS (server.py) — reuses its SSH key/user
-  service: vllm-qwen36-27b.service
+service_control:              # start/stop/restart backend services from the HUD
+                              # (/api/services, /api/services/{id}/action).
+                              # host must be a key in TERMINAL_HOSTS (server.py) — the
+                              # terminal panel's SSH key is reused, no new credentials.
+                              # scope: system = sudo systemctl; user = systemctl --user
+                              # (the Hermes gateway is a *user* unit under user@0.service).
+  - id: vllm
+    label: "vLLM · GPU brain"
+    host: snarf
+    unit: vllm-qwen36-27b.service
+    scope: system
+    critical: true            # stopping this takes Hermes' brain offline
+  - id: hermes-gateway
+    label: "Hermes gateway · API"
+    host: hermes
+    unit: hermes-gateway.service
+    scope: user
+    runtime_dir: /run/user/0
+    critical: true            # stopping this takes the HUD's own chat/voice offline
+  - id: hermes-dashboard
+    label: "Hermes dashboard"
+    host: hermes
+    unit: hermes-dashboard.service
+    scope: system

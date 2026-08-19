@@ -1677,20 +1677,46 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
         await _broadcast_network_activity(host, "claude", "end")
 
 
-# ---------------------------------------------------------------- vLLM control
+# ------------------------------------------------------------- service control
+# Start/stop/restart the backend services the HUD depends on (the vLLM GPU
+# brain on snarf, the Hermes gateway and dashboard on the hermes LXC) over the
+# terminal panel's existing SSH key and host allowlist — no new credentials.
+#
+# Two systemd scopes are supported, because they are genuinely both in play:
+#   system -> `sudo systemctl ...`            (vllm, hermes-dashboard)
+#   user   -> `systemctl --user ...` with XDG_RUNTIME_DIR set
+# The Hermes gateway runs as a *user* unit under root's user manager
+# (user@0.service/app.slice/hermes-gateway.service), which is why it never
+# shows up in `systemctl list-units` and needs the runtime dir exported for
+# non-interactive SSH to reach the right systemd instance.
 
-def _vllm_cfg() -> dict:
-    return CFG.get("vllm_control") or {}
+_SERVICE_ACTIONS = {"start", "stop", "restart"}
 
 
-async def _vllm_ssh_exec(cmd: str) -> tuple[int, str]:
-    """One-shot SSH command against the configured vLLM host — same key/user
-    as the terminal panel (TERMINAL_HOSTS), just a single command instead of
-    an interactive shell."""
-    cfg = _vllm_cfg()
-    target = TERMINAL_HOSTS.get(cfg.get("host", "snarf"))
+def _service_defs() -> list[dict]:
+    return CFG.get("service_control") or []
+
+
+def _find_service(service_id: str) -> dict | None:
+    return next((s for s in _service_defs() if s.get("id") == service_id), None)
+
+
+def _systemctl(svc: dict, verb: str) -> str:
+    """Build the systemctl command for one service, honouring its scope."""
+    unit = shlex.quote(svc["unit"])
+    if (svc.get("scope") or "system") == "user":
+        runtime_dir = svc.get("runtime_dir", "/run/user/0")
+        return f"XDG_RUNTIME_DIR={shlex.quote(runtime_dir)} systemctl --user {verb} {unit}"
+    prefix = "" if verb == "is-active" else "sudo "
+    return f"{prefix}systemctl {verb} {unit}"
+
+
+async def _service_ssh_exec(svc: dict, cmd: str) -> tuple[int, str]:
+    """One-shot SSH command against a service's host — same key/user as the
+    terminal panel (TERMINAL_HOSTS), a single command instead of a shell."""
+    target = TERMINAL_HOSTS.get(svc.get("host", ""))
     if not target:
-        raise RuntimeError(f"vllm_control.host {cfg.get('host')!r} is not a known terminal host")
+        raise RuntimeError(f"service host {svc.get('host')!r} is not a known terminal host")
     async with asyncssh.connect(
         target["host"], username=target["user"], client_keys=[TERMINAL_KEY_PATH],
     ) as conn:
@@ -1699,36 +1725,43 @@ async def _vllm_ssh_exec(cmd: str) -> tuple[int, str]:
         return result.exit_status, output
 
 
-@app.get("/api/vllm/status")
-async def vllm_status() -> JSONResponse:
-    service = _vllm_cfg().get("service")
-    if not service:
-        return JSONResponse({"error": "vllm_control not configured"}, status_code=503)
+async def _service_state(svc: dict) -> str:
     try:
-        _, output = await _vllm_ssh_exec(f"systemctl is-active {shlex.quote(service)}")
-    except Exception as exc:
-        return JSONResponse({"active": "unknown", "error": str(exc)}, status_code=502)
-    state = output.splitlines()[0].strip() if output else "unknown"
-    return JSONResponse({"active": state, "service": service})
+        _, output = await _service_ssh_exec(svc, _systemctl(svc, "is-active"))
+    except Exception:
+        return "unreachable"
+    return output.splitlines()[0].strip() if output else "unknown"
 
 
-_VLLM_ACTIONS = {"start", "stop", "restart"}
+@app.get("/api/services")
+async def services_status() -> JSONResponse:
+    defs = _service_defs()
+    if not defs:
+        return JSONResponse({"services": []})
+    states = await asyncio.gather(*[_service_state(s) for s in defs])
+    return JSONResponse({"services": [
+        {"id": s["id"], "label": s.get("label", s["id"]), "host": s.get("host"),
+         "unit": s.get("unit"), "scope": s.get("scope", "system"),
+         "critical": bool(s.get("critical")), "active": state}
+        for s, state in zip(defs, states)
+    ]})
 
 
-@app.post("/api/vllm/action")
-async def vllm_action(request: Request) -> JSONResponse:
-    service = _vllm_cfg().get("service")
-    if not service:
-        return JSONResponse({"error": "vllm_control not configured"}, status_code=503)
+@app.post("/api/services/{service_id}/action")
+async def service_action(service_id: str, request: Request) -> JSONResponse:
+    svc = _find_service(service_id)
+    if not svc:
+        return JSONResponse({"error": f"unknown service {service_id!r}"}, status_code=404)
     body = await request.json()
     action = body.get("action")
-    if action not in _VLLM_ACTIONS:
-        return JSONResponse({"error": f"action must be one of {sorted(_VLLM_ACTIONS)}"}, status_code=400)
+    if action not in _SERVICE_ACTIONS:
+        return JSONResponse({"error": f"action must be one of {sorted(_SERVICE_ACTIONS)}"}, status_code=400)
     try:
-        exit_status, output = await _vllm_ssh_exec(f"sudo systemctl {action} {shlex.quote(service)}")
+        exit_status, output = await _service_ssh_exec(svc, _systemctl(svc, action))
     except Exception as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
-    return JSONResponse({"ok": exit_status == 0, "action": action, "output": output[-2000:]})
+    return JSONResponse({"ok": exit_status == 0, "id": service_id, "action": action,
+                         "output": output[-2000:]})
 
 
 @app.websocket("/ws")
