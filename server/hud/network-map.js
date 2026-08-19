@@ -409,111 +409,122 @@ function onNodeClick(n){
    ground so it reads as a *place* the fleet lives in, not a plot on a
    graph. Built once and added straight into 3d-force-graph's own scene
    (graph.scene()). */
-// Real Apollo 15 lunar-surface photograph (NASA as15-97-13168) — see
-// vendor/textures/CREDITS.md. Mapped ONCE across the terrain, never tiled:
-// mirrored repeat made the repetition obvious (the same crater field stamped
-// and flipped over and over). One pass costs texel density up close, which
-// the displaced geometry below more than repays.
-function loadMoonTexture(THREE, onReady){
-  const loader=new THREE.TextureLoader();
-  return loader.load("vendor/textures/moon-surface.jpg", tex=>{
-    tex.wrapS=tex.wrapT=THREE.ClampToEdgeWrapping;
-    tex.repeat.set(1,1);
-    tex.anisotropy=16;
-    if(onReady) onReady(tex, blurredCopy(THREE, tex.image));
-  });
+// ---- TRON grid landscape -------------------------------------------------
+// Procedural glowing wireframe terrain. This replaced a photographic lunar
+// surface, which was structurally doomed to look blurry: a single 2048px
+// photo stretched over thousands of world units, viewed from a few hundred,
+// is ~0.4 texels per unit — enormous magnification no setting can sharpen.
+// Lines are vector geometry, so this stays pixel-crisp at ANY zoom, can never
+// tile visibly, and costs no texture memory.
+//
+// The terrain FLOWS toward the viewer rather than sitting still. Two tiles
+// leapfrog: each is TILE_DEPTH deep and the height function is periodic over
+// exactly that depth, so tiles abut seamlessly and a recycled tile is
+// indistinguishable from the one it follows.
+const TILE_W = 14000, TILE_DEPTH = 9000, GRID_COLS = 84, GRID_ROWS = 84;
+const GRID_FLOW = 26;            // world units per second, toward the camera
+let gridTiles = [];
+let gridscapeBuilt = false;
+
+// Periodic in z over TILE_DEPTH (integer harmonics only) — that periodicity
+// is what makes the tiling seamless.
+function gridHeight(x, z){
+  const t = 2 * Math.PI * z / TILE_DEPTH;
+  return 210 * Math.sin(t) +
+         120 * Math.sin(2 * t + x * 0.00042) +
+          64 * Math.sin(3 * t - x * 0.00071) +
+          38 * Math.sin(5 * t + x * 0.00115);
 }
 
-// A heavily blurred copy of the photo, for DISPLACEMENT only.
-// Displacing straight from the sharp photo turns every speck of grain into a
-// spike — the terrain came out looking like crumpled foil rather than a
-// moonscape. Downsampling to 72px and scaling back up with smoothing keeps
-// only the large landforms (basins, ridges, big crater bowls), while the
-// full-resolution photo still supplies colour and fine bump detail.
-function blurredCopy(THREE, img){
-  if(!img) return null;
-  const small=document.createElement("canvas"); small.width=small.height=104;
-  small.getContext("2d").drawImage(img,0,0,104,104);
-  const big=document.createElement("canvas"); big.width=big.height=1024;
-  const ctx=big.getContext("2d");
-  ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality="high";
-  ctx.drawImage(small,0,0,1024,1024);
-  const tex=new THREE.CanvasTexture(big);
-  tex.wrapS=tex.wrapT=THREE.ClampToEdgeWrapping;
-  return tex;
-}
-let moonscapeBuilt=false;
-function buildMoonscape(THREE, scene, renderer){
-  if(moonscapeBuilt) return;
-  moonscapeBuilt=true;
-
-  // Space, not sky. A blue-grey gradient made the horizon read as haze on a
-  // planet with an atmosphere; the Moon has none, so terrain should fall off
-  // into pure black with stars behind it.
-  scene.background=new THREE.Color(0x000000);
-  scene.fog=new THREE.FogExp2(0x000000, 0.00085);
-
-  // Real relief. A flat plane with only a bumpMap fakes shading but has no
-  // silhouette, no occlusion and cannot self-shadow — which is why the old
-  // ground looked flat and "boring". This is a heavily subdivided plane whose
-  // vertices are actually displaced by the photo's luminance, so craters are
-  // genuine depressions that catch the sun and throw shadows into themselves.
-  const groundMat=new THREE.MeshStandardMaterial({
-    // Regolith is mid-grey, not white. A brighter albedo under a 3-intensity
-    // sun clipped the whole surface to a featureless white sheet.
-    color:0x8d929c, roughness:1.0, metalness:0.0,
-    displacementScale:225, bumpScale:3.0,
-  });
-  const moonTex=loadMoonTexture(THREE, (tex, displaceTex)=>{
-    groundMat.map=tex;
-    groundMat.bumpMap=tex;                       // sharp photo → fine surface grain
-    groundMat.displacementMap=displaceTex||tex;  // blurred copy → landforms
-    groundMat.needsUpdate=true;
-  });
-  groundMat.map=moonTex;
-  const ground=new THREE.Mesh(new THREE.PlaneGeometry(5200,5200,300,300), groundMat);
-  ground.rotation.x=-Math.PI/2;
-  ground.position.y=-400;
-  ground.receiveShadow=true;
-  ground.castShadow=true;
-  scene.add(ground);
-
-  // starfield — fog:false, or the black distance fog would swallow the stars
-  const starCount=2600;
-  const positions=new Float32Array(starCount*3);
-  for(let i=0;i<starCount;i++){
-    const r=2600+Math.random()*2600;
-    const theta=Math.random()*Math.PI*2, phi=Math.acos(Math.random()*0.9);
-    positions[i*3]=r*Math.sin(phi)*Math.cos(theta);
-    positions[i*3+1]=Math.abs(r*Math.cos(phi))+120;
-    positions[i*3+2]=r*Math.sin(phi)*Math.sin(theta);
+function buildGridTile(THREE){
+  const pts = [];
+  const dx = TILE_W / GRID_COLS, dz = TILE_DEPTH / GRID_ROWS;
+  for (let i = 0; i <= GRID_COLS; i++){          // lines running away from camera
+    const x = -TILE_W / 2 + i * dx;
+    for (let j = 0; j < GRID_ROWS; j++){
+      const z1 = -TILE_DEPTH / 2 + j * dz, z2 = z1 + dz;
+      pts.push(x, gridHeight(x, z1), z1, x, gridHeight(x, z2), z2);
+    }
   }
-  const starGeo=new THREE.BufferGeometry();
-  starGeo.setAttribute("position", new THREE.BufferAttribute(positions,3));
+  for (let j = 0; j <= GRID_ROWS; j++){          // lines running across
+    const z = -TILE_DEPTH / 2 + j * dz;
+    for (let i = 0; i < GRID_COLS; i++){
+      const x1 = -TILE_W / 2 + i * dx, x2 = x1 + dx;
+      pts.push(x1, gridHeight(x1, z), z, x2, gridHeight(x2, z), z);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+  const mat = new THREE.LineBasicMaterial({
+    color: PALETTE.cyan, transparent: true, opacity: 0.62,
+  });
+  return new THREE.LineSegments(geo, mat);
+}
+
+function buildGridscape(THREE, scene){
+  if (gridscapeBuilt) return;
+  gridscapeBuilt = true;
+
+  scene.background = new THREE.Color(0x000000);
+  // Fog does the horizon fade, so the grid dissolves into space instead of
+  // ending on a hard edge.
+  scene.fog = new THREE.FogExp2(0x000205, 0.00042);
+
+  for (const z of [0, -TILE_DEPTH]){
+    const tile = buildGridTile(THREE);
+    tile.position.set(0, -430, z);
+    scene.add(tile);
+    gridTiles.push(tile);
+  }
+
+  // Horizon glow — a vertical gradient, not a flat slab: a constant-opacity
+  // plane reads as a magenta rectangle with visible edges rather than light.
+  const hc=document.createElement("canvas"); hc.width=4; hc.height=256;
+  const hctx=hc.getContext("2d");
+  const hg=hctx.createLinearGradient(0,0,0,256);
+  hg.addColorStop(0,"rgba(255,47,208,0)");
+  hg.addColorStop(0.62,"rgba(255,47,208,0.30)");
+  hg.addColorStop(0.86,"rgba(34,229,255,0.22)");
+  hg.addColorStop(1,"rgba(34,229,255,0)");
+  hctx.fillStyle=hg; hctx.fillRect(0,0,4,256);
+  const horizon=new THREE.Mesh(
+    new THREE.PlaneGeometry(TILE_W*1.6, 1500),
+    new THREE.MeshBasicMaterial({
+      map:new THREE.CanvasTexture(hc), transparent:true, opacity:0.9,
+      depthWrite:false, side:THREE.DoubleSide, fog:false,
+    })
+  );
+  horizon.position.set(0,-160,-TILE_DEPTH*0.95);
+  scene.add(horizon);
+
+  const starCount = 2600;
+  const positions = new Float32Array(starCount * 3);
+  for (let i = 0; i < starCount; i++){
+    const r = 3000 + Math.random() * 3000;
+    const theta = Math.random() * Math.PI * 2, phi = Math.acos(Math.random() * 0.9);
+    positions[i * 3]     = r * Math.sin(phi) * Math.cos(theta);
+    positions[i * 3 + 1] = Math.abs(r * Math.cos(phi)) + 200;
+    positions[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({
-    color:0xcfe0ff, size:2.4, sizeAttenuation:false, transparent:true,
-    opacity:0.9, fog:false,
+    color: 0xcfe0ff, size: 2.2, sizeAttenuation: false,
+    transparent: true, opacity: 0.85, fog: false,
   })));
 
-  // Very low, raking sun. Lunar photographs read as lunar because of long
-  // hard shadows; a high light flattens the craters straight back out.
-  const sun=new THREE.DirectionalLight(0xfff2e2, 2.2);
-  sun.position.set(-2400,560,700);
-  sun.castShadow=true;
-  sun.shadow.mapSize.set(2048,2048);
-  sun.shadow.camera.near=10; sun.shadow.camera.far=9000;
-  const span=2800;
-  sun.shadow.camera.left=-span; sun.shadow.camera.right=span;
-  sun.shadow.camera.top=span;   sun.shadow.camera.bottom=-span;
-  sun.shadow.bias=-0.0016;
-  scene.add(sun);
-  // Barely-there fill. On an airless body the shadows really are almost black;
-  // this only stops them clipping to pure void.
-  scene.add(new THREE.AmbientLight(0x1b2436, 0.28));
+  // Unlit scene — every material here is Basic, so no lights are needed and
+  // nothing can be blown out by them (which is what washed the nodes white
+  // back when the terrain needed a strong sun).
+}
 
-  if(renderer){
-    renderer.shadowMap.enabled=true;
-    renderer.shadowMap.type=THREE.PCFShadowMap;  // PCFSoft is deprecated in this three build
+// Called every frame from tickIdle: slide both tiles toward the camera and
+// recycle whichever has passed behind it.
+function advanceGridscape(dtSeconds){
+  if (!gridTiles.length) return;
+  for (const tile of gridTiles){
+    tile.position.z += GRID_FLOW * dtSeconds;
+    if (tile.position.z > TILE_DEPTH) tile.position.z -= TILE_DEPTH * 2;
   }
 }
 
@@ -584,7 +595,7 @@ function ensureGraph(){
       return n.__viz;
     });
     try{
-      buildMoonscape(window.THREE3D, graph.scene(), graph.renderer());
+      buildGridscape(window.THREE3D, graph.scene());
       // Wider lens = stronger perspective convergence. The default felt flat
       // and "shallow"; this makes the terrain rush away toward the horizon.
       const cam=graph.camera();
@@ -621,7 +632,12 @@ let autoFramed=false;
 let idleSpin=null;
 let bloomPass=null;
 let zoomBaseDist=null;
+let lastFrameMs=0;
 function tickIdle(){
+  const now=performance.now();
+  const dt=lastFrameMs?Math.min(0.1,(now-lastFrameMs)/1000):0;
+  lastFrameMs=now;
+  if(netmapActive) advanceGridscape(dt);
   // Cheap continuous motion (ring spin only, no canvas/texture work) so the
   // scene reads as "live" even once the force simulation has cooled down
   // and stopped — a fully static scene reads as "a math plot".

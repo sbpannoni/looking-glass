@@ -248,6 +248,15 @@ function tabId(type,key){return `${type}:${key}`}
    fast double-click can never drop the action it was asked to perform. */
 let hudTurning=false;
 const TURN_OUT_MS=250, TURN_IN_MS=340;
+
+/* xterm and the graph canvas can't measure themselves mid-rotation, so
+   re-fit once the panel is square to the viewport again. */
+function refitActiveWorkTab(){
+  const active=document.querySelector(".work-panel.active");
+  const tab=active&&workTabs.get(active.dataset.tabId);
+  if(tab?.fitAddon)tab.fitAddon.fit();
+  if(tab?.onActivate)tab.onActivate();
+}
 function hudTurn(swap,{reverse=false}={}){
   const wa=$("work-area");
   const reduced=matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -255,6 +264,23 @@ function hudTurn(swap,{reverse=false}={}){
   hudTurning=true;
   document.body.classList.add("hud-banking");
   wa.classList.toggle("rev",reverse);
+
+  // A display:none element cannot animate, so when the work area is still
+  // hidden (opening the first view) there is nothing to turn OUT — the
+  // out-phase was silently doing nothing and the whole move looked broken.
+  // In that case go straight to the swap and play only the turn-in.
+  if(!wa.classList.contains("has-tabs")){
+    swap();
+    wa.classList.add("turn-in");
+    setTimeout(()=>{
+      wa.classList.remove("turn-in","rev");
+      document.body.classList.remove("hud-banking");
+      hudTurning=false;
+      refitActiveWorkTab();
+    },TURN_IN_MS);
+    return;
+  }
+
   wa.classList.add("turn-out");
   setTimeout(()=>{
     try{ swap(); }
@@ -265,12 +291,7 @@ function hudTurn(swap,{reverse=false}={}){
         wa.classList.remove("turn-in","rev");
         document.body.classList.remove("hud-banking");
         hudTurning=false;
-        // xterm/canvas can't measure themselves mid-rotation — re-fit now
-        // that the panel is square to the viewport again.
-        const active=document.querySelector(".work-panel.active");
-        const tab=active&&workTabs.get(active.dataset.tabId);
-        if(tab?.fitAddon)tab.fitAddon.fit();
-        if(tab?.onActivate)tab.onActivate();
+        refitActiveWorkTab();
       },TURN_IN_MS);
     }
   },TURN_OUT_MS);
