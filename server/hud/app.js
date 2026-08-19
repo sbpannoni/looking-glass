@@ -884,3 +884,24 @@ addEventListener("keydown",e=>{
 bootSequence(new URLSearchParams(location.search).get("boot")==="full");
 
 addMsg("sys","Looking Glass HUD online. Click the ring or press Space to talk.");
+
+/* ---- collapsible side panels -------------------------------------------
+   State persists per panel title so a layout you set stays set across reloads;
+   the HUD is left open for days and re-collapsing by hand every time would
+   defeat the point of reclaiming the space. */
+(function initCollapsiblePanels(){
+  const KEY = "lg.collapsed";
+  let saved = {};
+  try{ saved = JSON.parse(localStorage.getItem(KEY) || "{}"); }catch{}
+  document.querySelectorAll(".panel.collapsible").forEach(panel=>{
+    const h2 = panel.querySelector("h2");
+    const name = (h2 && h2.textContent || "").trim();
+    if(name in saved) panel.classList.toggle("collapsed", !!saved[name]);
+    if(!h2) return;
+    h2.addEventListener("click", ()=>{
+      const now = panel.classList.toggle("collapsed");
+      saved[name] = now;
+      try{ localStorage.setItem(KEY, JSON.stringify(saved)); }catch{}
+    });
+  });
+})();

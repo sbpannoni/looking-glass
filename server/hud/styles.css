@@ -503,3 +503,63 @@ body.view-map #work-area{display:none !important}
    status panel is worse than no row at all. */
 .dot.na{background:var(--txt-dim); box-shadow:none; opacity:.5}
 .mach-row.mach-na{opacity:.55}
+
+/* ===================== PROJECT FLOW view ===========================
+   Keep DISPLAY out of the base rule — .work-panel.active is two classes and
+   beats a single-class selector, so layout props and display must be split
+   (this bit us on the kanban log pane). */
+.flow-pane{overflow:hidden; min-height:0}
+.work-panel.active.flow-pane{display:flex; flex-direction:column}
+.flow-head-bar{font-size:9px; letter-spacing:2px; color:var(--txt-dim);
+  padding:8px 10px; border-bottom:1px solid var(--line); flex:0 0 auto}
+.flow-grid{flex:1 1 auto; overflow-y:auto; min-height:0; display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; padding:10px;
+  /* size cards to their content — grid items stretch to the row height by
+     default, which left short cards as tall empty boxes */
+  align-content:start; align-items:start}
+.flow-card{border:1px solid var(--line); border-top:2px solid var(--cyan);
+  background:#050d16cc; padding:9px 10px; transition:border-color .15s, transform .15s}
+.flow-card:hover{border-color:var(--cyan); transform:translateY(-2px)}
+.flow-card.noagent{border-top-color:var(--amber)}
+.flow-head{display:flex; align-items:center; gap:6px; font-family:'Orbitron';
+  font-size:11px; letter-spacing:1px; margin-bottom:6px}
+.flow-node{font-size:11px; color:var(--cyan); letter-spacing:1px}
+.flow-virt{font-size:8px; color:var(--txt-dim); border:1px solid var(--line);
+  border-radius:2px; padding:1px 4px; margin-left:6px; letter-spacing:1px}
+.flow-path{font-size:10px; color:var(--txt-dim); word-break:break-all; margin-top:2px}
+.flow-repo{font-size:9px; color:var(--magenta); margin-top:2px; letter-spacing:.5px}
+.flow-agent{font-size:9px; letter-spacing:1px; margin-top:6px; text-transform:uppercase}
+.flow-steward{font-size:9px; color:var(--amber); margin-top:3px}
+.flow-owns{margin:6px 0 0 14px; padding:0; font-size:10px; color:var(--txt-dim)}
+.flow-owns li{margin:1px 0}
+.flow-projects{margin-top:7px; display:flex; flex-wrap:wrap; gap:4px}
+.flow-proj{font-size:9px; color:var(--amber); border:1px solid var(--amber);
+  border-radius:2px; padding:1px 5px; letter-spacing:1px}
+.flow-note{font-size:9px; color:var(--txt-dim); margin-top:6px; padding-top:5px;
+  border-top:1px dashed var(--line); font-style:italic}
+.flow-unowned{flex:0 0 auto; font-size:10px; color:var(--txt-dim); padding:8px 10px;
+  border-top:1px solid var(--line); display:flex; gap:6px; align-items:center; flex-wrap:wrap}
+
+/* QUICK ACCESS: tile carries its virtualisation handle underneath. */
+.terminal-tile{display:flex; flex-direction:column; align-items:center; gap:1px; line-height:1.15}
+.tile-sub{font-size:7px; letter-spacing:1px; color:var(--txt-dim); opacity:.8}
+.qa-sub{font-size:8px; letter-spacing:2px; color:var(--txt-dim);
+  margin:9px 0 4px; padding-top:7px; border-top:1px solid var(--line)}
+.proj-node{font-size:8px; letter-spacing:1px; color:var(--cyan); margin-left:6px;
+  border:1px solid var(--line); border-radius:2px; padding:0 4px}
+.proj-native{font-size:8px; letter-spacing:1px; color:var(--teal,#2dd4bf); margin-left:4px}
+.proj-none{font-size:8px; letter-spacing:1px; color:var(--txt-dim); margin-left:6px; opacity:.7}
+
+/* Collapsible side panels. VOICE LINK / TURN METRICS / SESSION are status you
+   glance at, not controls you drive, so they start collapsed and give their
+   vertical space to MACHINES and QUICK ACCESS. Click the header to toggle.
+   Collapse hides every child *except* the h2 — a max-height animation would
+   need a fixed height, and these panels have none. */
+.panel.collapsible > h2{cursor:pointer; user-select:none}
+.panel.collapsible > h2::after{content:"▾"; font-size:8px; margin-left:6px;
+  color:var(--txt-dim); transition:transform .15s}
+.panel.collapsible.collapsed > h2::after{transform:rotate(-90deg); display:inline-block}
+/* !important is load-bearing: VOICE LINK's button row carries an inline
+   `display:flex`, and an inline style beats any stylesheet selector. */
+.panel.collapsible.collapsed > *:not(h2){display:none !important}
+.panel.collapsible.collapsed{padding-bottom:6px}

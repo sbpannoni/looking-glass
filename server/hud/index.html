@@ -57,7 +57,7 @@
 
   <!-- LEFT COLUMN -->
   <div class="col" id="colLeft">
-    <div class="panel"><h2><span>VOICE LINK</span><span class="num">01</span></h2>
+    <div class="panel collapsible collapsed"><h2><span>VOICE LINK</span><span class="num">01</span></h2>
       <div class="kv"><span><span class="dot" id="wsDot"></span>Socket</span><b id="wsState">offline</b></div>
       <div class="kv"><span><span class="dot" id="micDot"></span>Microphone</span><b id="micState">idle</b></div>
       <div class="kv"><span>Input level</span><b>&nbsp;</b></div>
@@ -70,7 +70,7 @@
     <div class="panel"><h2><span>AGENT ACTIVITY</span><span class="num">02</span></h2>
       <div id="activity"><div>— no activity yet —</div></div>
     </div>
-    <div class="panel"><h2><span>TURN METRICS</span><span class="num">03</span></h2>
+    <div class="panel collapsible collapsed"><h2><span>TURN METRICS</span><span class="num">03</span></h2>
       <div class="kv"><span>Turns</span><b id="mTurns">0</b></div>
       <div class="kv"><span>Last: speech→audio</span><b id="mFirst">—</b></div>
       <div class="kv"><span>Last: total</span><b id="mTotal">—</b></div>
@@ -81,13 +81,14 @@
       <button class="btn viewBtn" data-view="HERMES DASHBOARD" data-path="/">▸ HERMES DASHBOARD</button>
       <button class="btn viewBtn" data-view="CHAT" data-path="/chat">▸ DASHBOARD CHAT</button>
       <button class="btn viewBtn" id="netmapToggleBtn" data-action="netmap">▸ NETWORK MAP</button>
+      <button class="btn viewBtn" data-action="flow" style="border-color:var(--orange); color:var(--orange)">◈ PROJECT FLOW</button>
       <button class="btn viewBtn" data-action="pair" style="border-color:var(--magenta); color:var(--magenta)">◧ AGENT WORK + CLAUDE</button>
       <button class="btn viewBtn" data-action="hermes-live" title="The HUD's own chat thread — not where kanban work runs">▸ HUD CHAT THREAD</button>
       <button class="btn viewBtn" data-action="claude" data-host="snarf"
               data-title="claude · DARKHELIX"
               data-run="cd /ssdpool/DARKHELIX && bash -lc claude">▸ CLAUDE (REVIEW)</button>
     </div>
-    <div class="panel"><h2><span>SESSION</span><span class="num">05</span></h2>
+    <div class="panel collapsible collapsed"><h2><span>SESSION</span><span class="num">05</span></h2>
       <div class="kv"><span>Conversation</span><b>looking-glass-main</b></div>
       <div class="kv"><span>Memory scope</span><b>looking-glass:user:main</b></div>
       <div class="kv"><span>Active sessions</span><b id="hSessions">—</b></div>
@@ -157,11 +158,13 @@
         <button class="terminal-tile" data-host="hermes">hermes</button>
         <button class="terminal-tile" data-host="looking-glass">looking-glass</button>
       </div>
-    </div>
-    <div class="panel"><h2><span>PROJECTS</span><span class="num">12</span></h2>
+      <!-- Projects live here rather than in their own panel: an issue count is
+           only actionable once you know which box to open a terminal on, and
+           which agent already has the code in front of it. -->
+      <div class="qa-sub">PROJECTS · where they live</div>
       <div id="projectsList"><div class="kv"><span>loading…</span></div></div>
     </div>
-    <div class="panel accent-orange"><h2><span>BACKEND SERVICES</span><span class="num">13</span></h2>
+    <div class="panel accent-orange"><h2><span>BACKEND SERVICES</span><span class="num">12</span></h2>
       <div id="servicesList"><div class="kv"><span>loading…</span></div></div>
     </div>
   </div>
@@ -179,6 +182,7 @@
 <script src="panels.js"></script>
 <script src="vllm-control.js"></script>
 <script src="kanban.js"></script>
+<script src="ownership.js"></script>
 <script src="network-map.js"></script>
 </body>
 </html>

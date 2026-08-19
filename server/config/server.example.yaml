@@ -158,3 +158,53 @@ service_control:              # start/stop/restart backend services from the HUD
     host: hermes
     unit: hermes-dashboard.service
     scope: system
+
+ownership:                   # Who owns what, and which agent has native context.
+                             # Drives the PROJECT FLOW view and the sub-labels in
+                             # QUICK ACCESS. Kept here rather than in code because
+                             # it changes when the rack does, not when the app does.
+  virt:                      # virtualisation identity for nodes that have one —
+                             # shown under the QUICK ACCESS tile so `pct`/`qm`
+                             # commands have the id to hand
+    looking-glass:  {id: "CT112", on: beelink}
+    claude-control: {id: "CT110", on: beelink}
+    hermes:         {id: "CT111", on: beelink}
+    home-assistant: {id: "VM 100", name: "haos12.4", on: beelink}
+  domains:
+    - id: hud
+      label: "Looking Glass HUD"
+      node: looking-glass
+      path: /opt/looking-glass
+      repo: sbpannoni/looking-glass
+      agent: native            # a Claude lives here with the code
+      owns: ["HUD app + API", "network map", "kanban view"]
+    - id: infra
+      label: "Rack · power · monitoring · net"
+      node: claude-control
+      path: /root/homelab
+      repo: sbpannoni/claude-config
+      agent: native
+      owns: ["BMC / IPMI / power", "Prometheus + Grafana", "network", "mempalace"]
+    - id: darkhelix
+      label: "DARKHELIX"
+      node: snarf
+      path: /ssdpool/DARKHELIX
+      repo: sbpannoni/DARKHELIX
+      agent: native
+      owns: ["classifier codebase", "reviews Hermes' kanban output"]
+    - id: hermes
+      label: "Hermes Agent"
+      node: hermes
+      path: ~/.hermes
+      repo: null
+      agent: none              # no Claude installed on CT111
+      steward: claude-control   # so infra drives it over ssh
+      owns: ["SOUL.md / MEMORY.md", "profiles · skills · toolsets", "kanban board"]
+      note: "Vendor build v0.20.0 at /usr/local/lib/hermes-agent — configure it, don't patch it. /root/hermes-elite is a profile bundle, not source."
+    - id: brain
+      label: "vLLM · the model"
+      node: snarf
+      path: vllm-qwen36-27b.service
+      repo: null
+      agent: native
+      owns: ["qwen3.6-27b-awq", "GPU allocation"]

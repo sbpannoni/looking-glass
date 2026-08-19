@@ -104,17 +104,54 @@ async function refreshUsage(){
     }
   }catch{}
 }
+// Cached so the tile sub-labels and the project rows agree without two fetches.
+let _ownership = null;
+async function loadOwnership(){
+  try{ _ownership = await (await fetch("/api/ownership")).json(); }catch{ _ownership = null; }
+  return _ownership;
+}
+
+/* QUICK ACCESS tiles carry the virtualisation id underneath, because the label
+   you think in ("hermes") is not the handle `pct` wants (CT111) — and for
+   home-assistant the Proxmox name (haos12.4) matches nothing at all. Physical
+   boxes get no sub-label; there is nothing to disambiguate. */
+async function refreshQuickAccess(){
+  const own = _ownership || await loadOwnership();
+  const virt = (own && own.virt) || {};
+  document.querySelectorAll(".terminal-tile").forEach(tile=>{
+    const host = tile.dataset.host;
+    const v = virt[host];
+    if(!v || tile.querySelector(".tile-sub")) return;
+    const differs = v.name && v.name !== host;
+    tile.innerHTML = `<span class="tile-main">${host}</span>` +
+      `<span class="tile-sub">${v.id}${differs?" · "+v.name:""}</span>`;
+  });
+}
+
 async function refreshProjects(){
   try{
+    const own = _ownership || await loadOwnership();
+    const agentFor = {};
+    ((own&&own.domains)||[]).forEach(d=>{ (d.projects||[]).forEach(n=>{ agentFor[n]=d; }); });
+
     const r=await fetch("/api/projects"); const j=await r.json();
     $("projectsList").innerHTML=(j.projects||[]).map(p=>{
-      if(p.error)return `<div class="kv"><span><span class="dot off"></span>${p.name}</span><b>${p.error}</b></div>`;
+      const d = agentFor[p.name];
+      // The important distinction is not "which host" but "does an agent there
+      // already have the code" — that is the difference between asking Claude to
+      // work on it and asking Claude to go find it first.
+      const where = p.node
+        ? `<span class="proj-node">${p.node}</span>` +
+          (d && d.agent==="native" ? `<span class="proj-native">native ctx</span>` : "")
+        : `<span class="proj-none">no local checkout</span>`;
+      if(p.error)return `<div class="kv proj-row"><span><span class="dot off"></span>${p.name}</span><b>${p.error}</b></div>`;
       const pct=p.total?Math.round(p.done/p.total*100):0;
-      return `<div class="kv"><span>${p.name}</span><b>${p.done}/${p.total}</b></div>
+      return `<div class="kv proj-row" title="${p.checkout||p.repo||""}"><span>${p.name}${where}</span><b>${p.done}/${p.total}</b></div>
         <div class="bar"><i style="width:${pct}%"></i></div>`;
     }).join("")||"<div class='kv'><span>no projects configured</span></div>";
   }catch{ $("projectsList").innerHTML="<div class='kv'><span>unavailable</span></div>"; }
 }
+registerPanel({id:"quickaccess", refresh:refreshQuickAccess, intervalMs:300000});
 
 registerPanel({id:"health",    refresh:refreshHealth,   intervalMs:15000});
 registerPanel({id:"jobs",      refresh:refreshJobs,     intervalMs:60000});

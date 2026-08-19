@@ -1300,11 +1300,58 @@ async def brain() -> JSONResponse:
     return JSONResponse(data)
 
 
+# `node`/`checkout` say where the code actually is, so the HUD can show which
+# agent has native context for a project rather than just its issue counts. A
+# project with no checkout anywhere in the fleet is tracked but unowned — that is
+# a real state worth seeing, not a gap to paper over.
+def _ownership_cfg() -> dict:
+    return CFG.get("ownership") or {}
+
+
+@app.get("/api/ownership")
+async def ownership() -> JSONResponse:
+    """Which node owns which domain, and which agent has native context.
+
+    This exists because the answer was tribal knowledge: Hermes is configured on
+    CT111 but has no agent installed there, the rack's power/monitoring history
+    lives on CT110, and the HUD lives here — so work routinely got started on the
+    wrong box and re-derived things another node had already written down.
+
+    Live up/down is joined in from the topology poller so the diagram doubles as
+    a status view rather than a static picture.
+    """
+    cfg = _ownership_cfg()
+    up = {n["id"]: n.get("up") for n in (NETWORK_TOPOLOGY_STATE.get("nodes") or [])}
+    virt = cfg.get("virt") or {}
+
+    domains = []
+    for d in cfg.get("domains") or []:
+        node = d.get("node")
+        domains.append({
+            **d,
+            "online": up.get(node),
+            "virt": virt.get(node),
+            # match on domain, not node: snarf hosts both DARKHELIX and the
+            # vLLM unit, and the code belongs to only one of them
+            "projects": [p["name"] for p in TRACKED_PROJECTS if p.get("domain") == d.get("id")],
+        })
+
+    return JSONResponse({
+        "domains": domains,
+        "virt": virt,
+        "unowned": [p["name"] for p in TRACKED_PROJECTS if not p.get("node")],
+    })
+
+
 TRACKED_PROJECTS = [
-    {"name": "my-website", "repo": "sbpannoni/my-website", "ref": "main", "path": "TODO.md", "parser": "checkbox"},
-    {"name": "DARKHELIX", "repo": "sbpannoni/DARKHELIX", "ref": "master", "path": "TODO.md", "parser": "checkbox"},
-    {"name": "redqueen-website", "repo": "sbpannoni/redqueen-website", "ref": "main", "path": "TODO.md", "parser": "checkbox"},
-    {"name": "server", "repo": "sbpannoni/snarf", "ref": "main", "path": "STATUS.md", "parser": "status_table"},
+    {"name": "my-website", "repo": "sbpannoni/my-website", "ref": "main", "path": "TODO.md", "parser": "checkbox",
+     "node": None, "checkout": None},
+    {"name": "DARKHELIX", "repo": "sbpannoni/DARKHELIX", "ref": "master", "path": "TODO.md", "parser": "checkbox",
+     "node": "snarf", "checkout": "/ssdpool/DARKHELIX", "domain": "darkhelix"},
+    {"name": "redqueen-website", "repo": "sbpannoni/redqueen-website", "ref": "main", "path": "TODO.md", "parser": "checkbox",
+     "node": None, "checkout": None},
+    {"name": "server", "repo": "sbpannoni/snarf", "ref": "main", "path": "STATUS.md", "parser": "status_table",
+     "node": "claude-control", "checkout": None, "domain": "infra"},
 ]
 _STATUS_EMOJI = {"✅": "done", "🔄": "in_progress", "🚧": "blocked", "📋": "todo"}
 PROJECTS_CACHE: dict = {"ts": 0.0, "data": {}}
@@ -1360,12 +1407,16 @@ async def api_projects() -> JSONResponse:
     def fetch_all() -> dict:
         results = []
         for proj in TRACKED_PROJECTS:
+            # Location travels with the counts: "51 open" is only actionable once
+            # you know which box to open a terminal on to work them.
+            where = {"node": proj.get("node"), "checkout": proj.get("checkout"),
+                     "repo": proj["repo"]}
             content = _fetch_github_file(proj["repo"], proj["ref"], proj["path"])
             if content is None:
-                results.append({"name": proj["name"], "error": "unreachable"})
+                results.append({"name": proj["name"], "error": "unreachable", **where})
                 continue
             parser = _parse_checkbox_md if proj["parser"] == "checkbox" else _parse_status_table_md
-            results.append({"name": proj["name"], **parser(content)})
+            results.append({"name": proj["name"], **parser(content), **where})
         return {"projects": results}
 
     data = await asyncio.to_thread(fetch_all)
