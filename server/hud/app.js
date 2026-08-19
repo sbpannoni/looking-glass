@@ -264,6 +264,7 @@ function hudTurn(swap,{reverse=false}={}){
   hudTurning=true;
   document.body.classList.add("hud-banking");
   wa.classList.toggle("rev",reverse);
+  document.body.classList.toggle("turn-rev",reverse);
 
   // A display:none element cannot animate, so when the work area is still
   // hidden (opening the first view) there is nothing to turn OUT — the
@@ -274,7 +275,7 @@ function hudTurn(swap,{reverse=false}={}){
     wa.classList.add("turn-in");
     setTimeout(()=>{
       wa.classList.remove("turn-in","rev");
-      document.body.classList.remove("hud-banking");
+      document.body.classList.remove("hud-banking","turn-rev");
       hudTurning=false;
       refitActiveWorkTab();
     },TURN_IN_MS);
@@ -289,7 +290,7 @@ function hudTurn(swap,{reverse=false}={}){
       wa.classList.add("turn-in");
       setTimeout(()=>{
         wa.classList.remove("turn-in","rev");
-        document.body.classList.remove("hud-banking");
+        document.body.classList.remove("hud-banking","turn-rev");
         hudTurning=false;
         refitActiveWorkTab();
       },TURN_IN_MS);

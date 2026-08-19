@@ -224,29 +224,38 @@ button.btn.amber{color:var(--amber); border-color:#7a5a1a; background:#241c0a}
    element a containing block for position:fixed descendants, and #grid holds
    the fixed #holoStage — putting it there would reparent the hologram
    panels to the grid box. */
-#center{perspective:1800px; perspective-origin:50% 42%}
+#center{perspective:1500px; perspective-origin:50% 45%}
 body.hud-banking #center{overflow:visible}   /* don't clip the rotation */
 #work-area{transform-style:preserve-3d; will-change:transform,opacity}
 #work-area.turn-out{animation:viewTurnOutL .25s cubic-bezier(.4,0,.9,.45) both}
 #work-area.turn-out.rev{animation-name:viewTurnOutR}
 #work-area.turn-in{animation:viewTurnInR .34s cubic-bezier(.2,.85,.3,1) both}
 #work-area.turn-in.rev{animation-name:viewTurnInL}
+/* The panel is treated as FIXED IN THE WORLD while the camera pans past it:
+   it travels sideways across the viewport and turns away as it goes, rather
+   than spinning in place. Outgoing and incoming slide the same direction, so
+   the whole move reads as one camera pan rather than two unrelated spins. */
 @keyframes viewTurnOutL{
-  from{transform:none; opacity:1; filter:brightness(1)}
-  to{transform:rotateY(-70deg) translateZ(-240px); opacity:.08; filter:brightness(1.5)}}
+  from{transform:translateX(0) rotateY(0) translateZ(0); opacity:1}
+  to{transform:translateX(-62%) rotateY(34deg) translateZ(-300px); opacity:0}}
 @keyframes viewTurnOutR{
-  from{transform:none; opacity:1; filter:brightness(1)}
-  to{transform:rotateY(70deg) translateZ(-240px); opacity:.08; filter:brightness(1.5)}}
+  from{transform:translateX(0) rotateY(0) translateZ(0); opacity:1}
+  to{transform:translateX(62%) rotateY(-34deg) translateZ(-300px); opacity:0}}
 @keyframes viewTurnInR{
-  from{transform:rotateY(70deg) translateZ(-240px); opacity:.08; filter:brightness(1.5)}
-  to{transform:none; opacity:1; filter:brightness(1)}}
+  from{transform:translateX(62%) rotateY(-34deg) translateZ(-300px); opacity:0}
+  to{transform:translateX(0) rotateY(0) translateZ(0); opacity:1}}
 @keyframes viewTurnInL{
-  from{transform:rotateY(-70deg) translateZ(-240px); opacity:.08; filter:brightness(1.5)}
-  to{transform:none; opacity:1; filter:brightness(1)}}
+  from{transform:translateX(-62%) rotateY(34deg) translateZ(-300px); opacity:0}
+  to{transform:translateX(0) rotateY(0) translateZ(0); opacity:1}}
 .col{transition:transform .32s cubic-bezier(.3,.8,.4,1), filter .32s ease}
 body.hud-banking .col{filter:brightness(.7) saturate(.85)}
-body.hud-banking #colLeft{transform:perspective(1500px) rotateY(7deg) translateZ(-46px)}
-body.hud-banking #colRight{transform:perspective(1500px) rotateY(-7deg) translateZ(-46px)}
+/* Columns drift laterally in the SAME direction as the work area, so the
+   whole HUD reads as one camera move past fixed panels rather than the
+   centre spinning while the sides merely tilt. */
+body.hud-banking #colLeft{transform:perspective(1500px) translateX(-16px) rotateY(7deg) translateZ(-46px)}
+body.hud-banking #colRight{transform:perspective(1500px) translateX(-16px) rotateY(-7deg) translateZ(-46px)}
+body.hud-banking.turn-rev #colLeft{transform:perspective(1500px) translateX(16px) rotateY(7deg) translateZ(-46px)}
+body.hud-banking.turn-rev #colRight{transform:perspective(1500px) translateX(16px) rotateY(-7deg) translateZ(-46px)}
 body.hud-banking header,body.hud-banking footer{filter:brightness(.78)}
 header,footer{transition:filter .32s ease}
 @media (prefers-reduced-motion:reduce){

@@ -421,7 +421,11 @@ function onNodeClick(n){
 // leapfrog: each is TILE_DEPTH deep and the height function is periodic over
 // exactly that depth, so tiles abut seamlessly and a recycled tile is
 // indistinguishable from the one it follows.
-const TILE_W = 14000, TILE_DEPTH = 9000, GRID_COLS = 84, GRID_ROWS = 84;
+// TILE_W is deliberately far wider than the fog reach. Fog fully fades at
+// roughly sqrt(3)/density units (~5800 at 0.0003), so at +-24000 the grid's
+// own X edge is dissolved to black long before it can be seen — that visible
+// "cutoff of the hills" was the tile boundary, not a horizon.
+const TILE_W = 48000, TILE_DEPTH = 11000, GRID_COLS = 240, GRID_ROWS = 90;
 const GRID_FLOW = 26;            // world units per second, toward the camera
 let gridTiles = [];
 let gridscapeBuilt = false;
@@ -468,7 +472,7 @@ function buildGridscape(THREE, scene){
   scene.background = new THREE.Color(0x000000);
   // Fog does the horizon fade, so the grid dissolves into space instead of
   // ending on a hard edge.
-  scene.fog = new THREE.FogExp2(0x000205, 0.00042);
+  scene.fog = new THREE.FogExp2(0x000205, 0.00030);
 
   for (const z of [0, -TILE_DEPTH]){
     const tile = buildGridTile(THREE);
@@ -477,25 +481,30 @@ function buildGridscape(THREE, scene){
     gridTiles.push(tile);
   }
 
-  // Horizon glow — a vertical gradient, not a flat slab: a constant-opacity
-  // plane reads as a magenta rectangle with visible edges rather than light.
-  const hc=document.createElement("canvas"); hc.width=4; hc.height=256;
-  const hctx=hc.getContext("2d");
-  const hg=hctx.createLinearGradient(0,0,0,256);
-  hg.addColorStop(0,"rgba(255,47,208,0)");
-  hg.addColorStop(0.62,"rgba(255,47,208,0.30)");
-  hg.addColorStop(0.86,"rgba(34,229,255,0.22)");
-  hg.addColorStop(1,"rgba(34,229,255,0)");
-  hctx.fillStyle=hg; hctx.fillRect(0,0,4,256);
-  const horizon=new THREE.Mesh(
-    new THREE.PlaneGeometry(TILE_W*1.6, 1500),
-    new THREE.MeshBasicMaterial({
-      map:new THREE.CanvasTexture(hc), transparent:true, opacity:0.9,
-      depthWrite:false, side:THREE.DoubleSide, fog:false,
-    })
+  // A REAL horizon: a sky dome surrounding the whole scene, with the glow
+  // banded at eye level, so the ground appears to meet the sky in every
+  // direction and at any camera angle. The previous version was a flat plane
+  // parked at a fixed z — it only worked from one viewpoint and was really
+  // just masking where the geometry stopped.
+  const sc=document.createElement("canvas"); sc.width=8; sc.height=512;
+  const sctx=sc.getContext("2d");
+  const sg=sctx.createLinearGradient(0,0,0,512);
+  sg.addColorStop(0.00,"#000000");           // zenith
+  sg.addColorStop(0.42,"#03000a");
+  sg.addColorStop(0.49,"#2a0730");           // glow builds toward the horizon
+  sg.addColorStop(0.50,"#5c1060");           // horizon line itself
+  sg.addColorStop(0.515,"#12103a");
+  sg.addColorStop(0.60,"#01030a");
+  sg.addColorStop(1.00,"#000000");           // below the horizon
+  sctx.fillStyle=sg; sctx.fillRect(0,0,8,512);
+  const skyTex=new THREE.CanvasTexture(sc);
+  const sky=new THREE.Mesh(
+    new THREE.SphereGeometry(30000, 32, 24),
+    new THREE.MeshBasicMaterial({map:skyTex, side:THREE.BackSide, fog:false, depthWrite:false})
   );
-  horizon.position.set(0,-160,-TILE_DEPTH*0.95);
-  scene.add(horizon);
+  // Centred on the grid's eye level so the gradient's midpoint IS the horizon.
+  sky.position.y=-430;
+  scene.add(sky);
 
   const starCount = 2600;
   const positions = new Float32Array(starCount * 3);
