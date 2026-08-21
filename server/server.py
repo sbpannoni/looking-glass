@@ -1364,6 +1364,170 @@ _STATUS_EMOJI = {"✅": "done", "🔄": "in_progress", "🚧": "blocked", "📋"
 PROJECTS_CACHE: dict = {"ts": 0.0, "data": {}}
 
 
+# ===================== CODER MODELS panel ============================
+# The coder-engine (Hermes+LangGraph+Aider) pipeline's Phase 3 eval harness
+# runs on snarf and appends one JSON record per (task, candidate model) run
+# to pipeline/eval/results/eval_results.json. CT112 has no standing route to
+# snarf's eval data, so a CT110 script (homelab/coder_models_refresh.py)
+# pulls that file, aggregates it, and pushes the result here as a plain JSON
+# file this endpoint reads from disk — same pull-then-push shape as the
+# ownership panel's TRACKED_PROJECTS, just sourced from a different node.
+# "Good for" text is static roster info (why this model was picked as a
+# candidate), not derived from the eval data, since it doesn't change per run.
+CODER_MODELS_METRICS_PATH = os.path.join(
+    os.path.dirname(__file__), "config", "coder_model_metrics.json"
+)
+CODER_MODELS_ROSTER = [
+    {
+        "id": "qwen3.6-27b-awq", "label": "Qwen3.6 27B", "license": "Apache 2.0",
+        "params": "27B dense, hybrid linear/full attention, 98K ctx (served)",
+        "status": "resident default",
+        "good_for": "Current pipeline default. Cited by multiple community sources as "
+                     "the highest verified SWE-bench Verified score among models that "
+                     "run on consumer hardware. General coding + reasoning.",
+    },
+    {
+        "id": "qwen2.5-32b-awq", "label": "Qwen2.5 32B", "license": "Apache 2.0",
+        "params": "32B dense, 32K ctx",
+        "status": "resident (rotation)",
+        "good_for": "General-purpose, not code-specialized. Baseline the code-tuned "
+                     "sibling (Qwen2.5-Coder-32B) gets compared against — same size "
+                     "class, so the delta isolates what code-specific training buys.",
+    },
+    {
+        "id": "llama3.1-70b-awq", "label": "Llama 3.1 70B", "license": "Llama 3.1 Community",
+        "params": "70B dense, TP=2 required",
+        "status": "resident (rotation)",
+        "good_for": "Largest resident model. General-purpose, not code-tuned. Tests "
+                     "whether raw scale beats smaller code-specialized models on these "
+                     "chunk-sized edits.",
+    },
+    {
+        "id": "qwen3-14b-awq", "label": "Qwen3 14B", "license": "Apache 2.0",
+        "params": "14.8B dense, TP=1, 40K ctx",
+        "status": "resident (rotation)",
+        "good_for": "Smallest resident model — fits one GPU, fastest cold-swap. Speed/"
+                     "quality floor reference for the rest of the roster.",
+    },
+    {
+        "id": "devstral-small-2-24b-awq", "label": "Devstral Small 2 24B", "license": "Apache 2.0",
+        "params": "24B dense",
+        "status": "tested 2026-08-21 — 0.625 pass rate (best, tied)",
+        "good_for": "Purpose-built for agentic coding by Mistral + All Hands AI — "
+                     "closest architectural match to what this pipeline actually does "
+                     "(multi-step repo edits, test-gated, SWE-bench-style tasks).",
+    },
+    {
+        "id": "deepseek-r1-distill-qwen-32b-awq", "label": "DeepSeek-R1-Distill-Qwen 32B", "license": "MIT",
+        "params": "32B dense, reasoning-distilled from DeepSeek-R1",
+        "status": "tested 2026-08-21 — 0.625 pass rate (best, tied), ~3x slower than other candidates",
+        "good_for": "Reasoning-distilled onto a Qwen2.5-32B base. Tests whether "
+                     "reasoning-trace training helps on small, well-scoped edit tasks "
+                     "vs. a plain instruct model of the same size.",
+    },
+    {
+        "id": "qwen3-coder-30b-a3b-awq", "label": "Qwen3-Coder 30B-A3B", "license": "Apache 2.0",
+        "params": "30.5B total / 3.3B active MoE (128 experts, 8 routed)",
+        "status": "tested 2026-08-21 — 0.5 pass rate, no instability seen",
+        "good_for": "Coder-tuned MoE sibling of the resident default — fast inference "
+                     "despite the total param count. Was flagged higher-risk (AWQ+MoE "
+                     "instability reports elsewhere) but ran clean here: no crash-loop, "
+                     "no expert-parallel flag even needed with the deployed config.",
+    },
+    {
+        "id": "qwen2.5-coder-32b-instruct-awq", "label": "Qwen2.5-Coder 32B", "license": "Apache 2.0",
+        "params": "32B dense",
+        "status": "tested 2026-08-21 — 0.5 pass rate, 1 disagreement (self-reported done, code was actually broken)",
+        "good_for": "Official Qwen-org AWQ quant of the dedicated code model in the "
+                     "same size class as the already-resident general Qwen2.5-32B — "
+                     "direct code-specialized-vs-general ablation.",
+    },
+    {
+        "id": "kimi-linear-48b-a3b-awq", "label": "Kimi-Linear 48B-A3B", "license": "MIT",
+        "params": "48B total / 3B active MoE, novel linear attention (KDA), 1M ctx",
+        "status": "incompatible — hardware ceiling, not a config issue",
+        "good_for": "Genuinely bleeding-edge: Moonshot AI's Kimi Delta Attention "
+                     "(linear attention, not another transformer variant), same lab as "
+                     "the currently-hyped Kimi K3. RULED OUT 2026-08-21: its hybrid "
+                     "linear-attention kernel (KDA/short-conv) needs >64KB shared memory "
+                     "per block; this rig's GPUs (2x Quadro RTX 6000, compute capability "
+                     "7.5/Turing) cap at 65536 bytes/SM. vLLM crash-looped 31x before "
+                     "being stopped — see eval_results.json's infra-startup record for "
+                     "the trace. Not fixable via flags; would need a Turing-sized kernel "
+                     "path upstream or newer GPUs.",
+    },
+    {
+        "id": "codestral-22b-awq", "label": "Codestral 22B", "license": "Mistral AI Non-Production (MNPL) — research/internal use only",
+        "params": "22B dense, code-specialized, 32K ctx",
+        "status": "tested 2026-08-21 — 0.25 pass rate (worst), 3/8 hard timeouts",
+        "good_for": "Mistral's dedicated code model, same family as the resident "
+                     "Devstral (agentic-coding-tuned sibling) — this one is the "
+                     "general code-completion/generation base it was built from. "
+                     "Smallest dense candidate in the roster; tests whether a "
+                     "purpose-built code model beats larger general models at this "
+                     "size class. Non-commercial license -- internal eval only, not "
+                     "a production pick regardless of eval score. Note: the AWQ repo "
+                     "(TechxGenus) shipped with no chat_template — vLLM 0.23+ rejects "
+                     "every request without one. Patched from the upstream Mistral "
+                     "repo's tokenizer_config.json before this result was trusted; "
+                     "the first eval attempt silently produced garbage (uniform ~9s "
+                     "\"fails\" that were really instant 400 errors, not real attempts) "
+                     "before that was caught.",
+    },
+    {
+        "id": "gemma-4-31b-it-awq", "label": "Gemma 4 31B", "license": "Apache 2.0",
+        "params": "30.7B dense, multimodal (vision+video), 256K ctx",
+        "status": "candidate (downloading)",
+        "good_for": "Google DeepMind's latest open dense model, ranked #3 on the Arena "
+                     "AI text leaderboard among open models as of release. Standard "
+                     "attention (no exotic kernel risk like Kimi/MiniMax). Multimodal "
+                     "checkpoint served text-only (--language-model-only, matching the "
+                     "Devstral pattern) since this pipeline only needs code editing.",
+    },
+    {
+        "id": "qwen3.8-27b-int8-w8a16", "label": "Qwen3.8 27B (INT8)", "license": "Apache 2.0",
+        "params": "27.78B dense, hybrid Gated DeltaNet + Gated Attention, 262K ctx (1M w/ YaRN)",
+        "status": "candidate (downloading)",
+        "good_for": "Newer generation of the resident default's own architecture "
+                     "family (qwen3.6-27b-awq is 'hybrid linear/full attention' too, "
+                     "and has run clean all session) — lower kernel risk than a "
+                     "first-of-its-kind exotic attention scheme. INT8, not the "
+                     "official FP8 release: this rig's GPUs (Quadro RTX 6000, Turing) "
+                     "have no FP8 tensor cores at all (documented hard constraint), "
+                     "so the FP8 quant would run poorly or not at all. INT8 has real "
+                     "Turing tensor-core support. Multimodal checkpoint, served "
+                     "text-only.",
+    },
+]
+
+
+@app.get("/api/coder-models")
+async def coder_models() -> JSONResponse:
+    """Static roster + live-ish eval metrics for the coder-engine pipeline's
+    candidate models, for the "CODER MODELS" HUD panel. Metrics come from a
+    file CT110 refreshes (see CODER_MODELS_METRICS_PATH docstring above); a
+    model with no eval runs yet just shows "no runs yet", not an error."""
+    metrics_blob: dict = {}
+    try:
+        with open(CODER_MODELS_METRICS_PATH) as f:
+            metrics_blob = json.load(f)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        metrics_blob = {"_error": str(exc)}
+
+    per_model_metrics = metrics_blob.get("metrics", {})
+    models = [
+        {**entry, "metrics": per_model_metrics.get(entry["id"])}
+        for entry in CODER_MODELS_ROSTER
+    ]
+    return JSONResponse({
+        "models": models,
+        "metrics_generated_at": metrics_blob.get("generated_at"),
+        "metrics_source": metrics_blob.get("source"),
+    })
+
+
 def _parse_checkbox_md(text: str) -> dict:
     done = len(re.findall(r"^\s*-\s*\[[xX]\]", text, re.MULTILINE))
     open_ = len(re.findall(r"^\s*-\s*\[ \]", text, re.MULTILINE))
@@ -1999,6 +2163,17 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
     if not is_allowed_terminal_host(host):
         await ws.close(code=4404)
         return
+    # Optional ?tmux=<name>: wrap the shell in `tmux new-session -A -s <name>`
+    # instead of a bare login shell, so the remote session outlives this
+    # WebSocket -- a dropped connection, a closed tab, or a looking-glass
+    # service restart no longer kills whatever was running (e.g. `claude`
+    # mid-turn). Reopening the same host+name reattaches. Session name is
+    # whitelisted to safe chars since it's interpolated into a shell command
+    # sent over the SSH exec channel, not passed as an argv array.
+    tmux_session = ws.query_params.get("tmux")
+    if tmux_session and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", tmux_session):
+        await ws.close(code=4400)
+        return
     await ws.accept()
     target = TERMINAL_HOSTS[host]
     ACTIVE_TERMINALS.add(host)
@@ -2013,8 +2188,48 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
             # already populated via StrictHostKeyChecking=accept-new during key
             # deployment (see docs/superpowers/plans/... Task 8) - real host-key
             # verification, not disabled.
+            #
+            # keepalive: without this, an idle terminal (no keystrokes, no
+            # output) sends zero SSH traffic and asyncssh has no way to tell
+            # a genuinely dead connection apart from a quiet one. Any silent
+            # drop along the way -- the target's sshd reaping an idle
+            # session, a NAT/conntrack entry expiring on the LAN path --
+            # then surfaces as this websocket suddenly closing client-side
+            # ("terminal keeps disconnecting"), with no error to explain why.
+            # Periodic keepalive packets give asyncssh something to fail on
+            # quickly (surfacing a clear error instead of a silent hang) and,
+            # as a side effect, keep any stateful NAT/firewall's idle timer
+            # from expiring the connection in the first place.
+            keepalive_interval=15,
+            keepalive_count_max=3,
         ) as conn:
-            async with conn.create_process(term_type="xterm-256color") as process:
+            # tmux keeps the client's terminal in the alternate-screen buffer
+            # for its own rendering the entire time it's attached (that's
+            # true even at a bare shell prompt inside tmux, not just full-
+            # screen programs) -- so xterm.js's own scrollback essentially
+            # never accumulates in a tmux session. The scrollback the user
+            # actually wants live inside tmux itself, reachable only via
+            # tmux's own copy-mode, which tmux enters automatically on mouse
+            # wheel input ONLY once its `mouse` option is on (off by default).
+            # `\; set-option -t <session> mouse on` chains onto the same tmux
+            # invocation (`\;` is tmux's own command separator, escaped so
+            # the shell passes a literal `;` through instead of ending the
+            # command there) and re-applies every reconnect/reattach, so it
+            # doesn't depend on a ~/.tmux.conf on whatever host is targeted.
+            # Scoped with -t to this session only, not -g global, so it
+            # doesn't change mouse behavior for the user's other tmux use on
+            # the same host. Trade-off worth knowing: with mouse mode on,
+            # click-drag selects inside tmux's copy-mode instead of the
+            # browser's native text selection -- hold Shift while dragging
+            # to bypass tmux's mouse reporting and get a normal selection.
+            proc_cmd = (
+                f"tmux new-session -A -s {tmux_session} "
+                f"\\; set-option -t {tmux_session} mouse on"
+                if tmux_session else None
+            )
+            async with conn.create_process(
+                proc_cmd, term_type="xterm-256color"
+            ) as process:
 
                 async def pump_output() -> None:
                     try:
@@ -2029,8 +2244,32 @@ async def terminal_websocket(ws: WebSocket, host: str) -> None:
                 pump_task = asyncio.create_task(pump_output())
                 try:
                     while True:
-                        msg = await ws.receive_text()
-                        process.stdin.write(msg)
+                        # Keystrokes arrive as text frames (written straight to
+                        # stdin, unchanged). Resize notifications arrive as
+                        # BINARY frames carrying {"cols":.., "rows":..} JSON -
+                        # a distinct frame type so a resize message can never
+                        # be mistaken for literal shell input. Without this,
+                        # the remote pty stays locked at its initial size
+                        # forever: tmux/the shell keep wrapping and redrawing
+                        # for stale dimensions while xterm.js renders at the
+                        # real (resized) one, producing garbled/overlapping
+                        # text on long output.
+                        message = await ws.receive()
+                        if message["type"] == "websocket.disconnect":
+                            break
+                        data = message.get("bytes")
+                        if data is not None:
+                            try:
+                                size = json.loads(data.decode())
+                                process.change_terminal_size(
+                                    int(size["cols"]), int(size["rows"])
+                                )
+                            except Exception:
+                                pass
+                            continue
+                        text = message.get("text")
+                        if text is not None:
+                            process.stdin.write(text)
                 except WebSocketDisconnect:
                     pass
                 finally:

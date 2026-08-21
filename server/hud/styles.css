@@ -266,9 +266,50 @@ button.btn.amber{color:var(--amber); border-color:#7a5a1a; background:#241c0a}
 .work-view-iframe{width:100%; height:100%; border:0; background:var(--bg)}
 /* xterm must fill its panel exactly; if it is taller than the panel the extra
    rows are clipped with no way to reach them (the panel does not scroll —
-   xterm scrolls internally via .xterm-viewport). */
+   xterm scrolls internally via .xterm-viewport).
+
+   The breathing-room padding has to live on .xterm itself, not on
+   .work-panel: xterm-addon-fit sizes the terminal from the PARENT's full
+   box but only ever subtracts padding it finds on the .xterm element (see
+   FitAddon.proposeDimensions()). Padding on .work-panel is invisible to
+   that math, so fit() hands back a col/row count sized for the panel's
+   full box while the terminal is actually laid out inside the smaller,
+   padded area — the rightmost columns and bottom rows render past the
+   visible edge and get clipped by overflow:hidden. .term-panel zeroes the
+   panel's own padding and moves it onto .xterm so FitAddon accounts for
+   it correctly. */
+.work-panel.term-panel{padding:0; position:relative}
+.work-panel.term-panel .xterm{padding:10px}
 .work-panel .xterm{height:100%}
 .work-panel .xterm-viewport{overflow-y:auto}
+
+/* A full-screen program inside the terminal (the claude CLI itself, vim,
+   less, ...) uses the alternate screen buffer and asks the terminal to
+   translate mouse-wheel scroll into arrow-key presses -- standard terminal
+   behavior, not unique to this HUD, but it means the wheel can't be used to
+   reach real xterm scrollback while such a program owns the screen (wheel
+   scroll instead cycles the program's own history/selection). This slider
+   bypasses wheel events entirely: it drives xterm's scroll position through
+   its JS API directly, so it works regardless of what's currently running.
+   Sits inside the 10px padding .term-panel already reserves for .xterm
+   (see above), so it never overlaps rendered terminal text.
+
+   Built from plain divs + pointer events rather than a native
+   <input type=range> rotated/oriented vertical -- two rounds of CSS-only
+   vertical-range tricks (writing-mode, then -webkit-appearance:
+   slider-vertical) both turned out unreliable for the actual drag
+   interaction in practice, only the paint orientation. This owns 100% of
+   its own hit-testing and drag math, so it has no browser-specific
+   vertical-range quirks left to hit. */
+.term-scrollbar{
+  position:absolute; top:0; right:0; width:12px; height:100%; z-index:5;
+}
+.term-scrollbar-thumb{
+  position:absolute; left:2px; right:2px; min-height:20px;
+  background:var(--cyan); opacity:.45; border-radius:3px; cursor:ns-resize;
+  transition:opacity .1s ease;
+}
+.term-scrollbar-thumb:hover,.term-scrollbar-thumb.dragging{opacity:.8}
 
 /* ---------------- 3D view transitions ----------------
    Opening a view, closing one, or toggling the network map swings the work
@@ -539,6 +580,29 @@ body.view-map #work-area{display:none !important}
   border-top:1px dashed var(--line); font-style:italic}
 .flow-unowned{flex:0 0 auto; font-size:11px; color:var(--txt-dim); padding:8px 10px;
   border-top:1px solid var(--line); display:flex; gap:6px; align-items:center; flex-wrap:wrap}
+
+/* ===================== CODER MODELS view ============================
+   Reuses .flow-pane/.flow-head-bar/.flow-grid from PROJECT FLOW above —
+   same tab-turning shell, different card. */
+.mcard-grid{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))}
+.mcard{border:1px solid var(--line); border-top:2px solid var(--cyan);
+  background:#050d16cc; padding:9px 10px; transition:border-color .15s, transform .15s}
+.mcard:hover{border-color:var(--cyan); transform:translateY(-2px)}
+.mcard.risky{border-top-color:var(--amber)}
+.mcard-head{display:flex; align-items:center; gap:6px; font-family:'Orbitron';
+  font-size:11px; letter-spacing:1px; margin-bottom:4px}
+.mcard-license{margin-left:auto; font-size:9px; color:var(--txt-dim);
+  border:1px solid var(--line); border-radius:2px; padding:1px 4px; letter-spacing:.5px}
+.mcard-params{font-size:11px; color:var(--cyan); letter-spacing:.3px}
+.mcard-status{font-size:10px; color:var(--txt-dim); text-transform:uppercase;
+  letter-spacing:1px; margin-top:2px}
+.mcard.risky .mcard-status{color:var(--amber)}
+.mcard-good{font-size:11px; color:var(--txt); margin-top:6px; line-height:1.4}
+.mcard-metrics{margin-top:8px; padding-top:6px; border-top:1px dashed var(--line)}
+.mcard-metrics.mcard-none{font-size:10px; color:var(--txt-dim); font-style:italic}
+.mcard-metric-row{display:flex; justify-content:space-between; font-size:10px;
+  color:var(--txt-dim); margin:1px 0}
+.mcard-metric-row b{color:var(--txt)}
 
 /* QUICK ACCESS: tile carries its virtualisation handle underneath. */
 .terminal-tile{display:flex; flex-direction:column; align-items:center; gap:1px; line-height:1.15}

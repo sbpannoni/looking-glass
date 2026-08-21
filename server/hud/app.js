@@ -586,26 +586,143 @@ function openHermesChatPane(){
   });
 }
 
-function openTerminal(host,{run=null,title=null}={}){
+function openTerminal(host,{run=null,title=null,tmux=null}={}){
   openWorkTabTurning("terminal",host,title||host,(panel,tab)=>{
+    // term-panel moves the panel's padding onto .xterm itself — see the CSS
+    // comment above .work-panel.term-panel in styles.css for why (fitAddon
+    // only accounts for padding on .xterm, not on its parent).
+    panel.classList.add("term-panel");
     const term=new Terminal({convertEol:true, fontSize:13});
     const fitAddon=new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
     term.open(panel);
     fitAddon.fit();  // size to the actual panel, not xterm's 80x24 default
+
+    // A full-screen program inside the terminal (the claude CLI itself, vim,
+    // less, ...) uses the alternate screen buffer and asks xterm to
+    // translate mouse-wheel scroll into arrow-key presses -- standard
+    // terminal behavior, not something to "fix" at the xterm layer, but it
+    // means the wheel can't reach real scrollback while such a program owns
+    // the screen (wheel scroll instead cycles the program's own history).
+    // This slider drives xterm's scroll position through its JS API
+    // directly instead of wheel events, so it works regardless of what's
+    // running. See the .term-scrollbar comment in styles.css.
+    const scrollWrap=document.createElement("div");
+    scrollWrap.className="term-scrollbar";
+    const thumb=document.createElement("div");
+    thumb.className="term-scrollbar-thumb";
+    scrollWrap.appendChild(thumb);
+    panel.appendChild(scrollWrap);
+    // baseY is how far the buffer can scroll (0 while a program owns the alt
+    // screen and has no scrollback, or the shell buffer is empty). Kept in
+    // sync from three places: onScroll (fires once xterm's position actually
+    // changes), term.write's completion callback (wired below, in
+    // socket.onmessage -- catches output arriving while parsing is still in
+    // flight, which lags behind onScroll), and the panel ResizeObserver
+    // (wired further below -- track height and term.rows both change on
+    // resize, which changes thumb size even when scroll position doesn't).
+    const syncScrollRange=()=>{
+      const trackH=scrollWrap.clientHeight;
+      const baseY=term.buffer.active.baseY;
+      const totalLines=baseY+term.rows;
+      const thumbH=Math.max(20,trackH*(term.rows/totalLines));
+      const travel=trackH-thumbH;
+      const frac=baseY>0?term.buffer.active.viewportY/baseY:0;
+      thumb.style.height=thumbH+"px";
+      thumb.style.top=(travel*frac)+"px";
+    };
+    term.onScroll(syncScrollRange);
+    syncScrollRange();
+
+    let dragging=false,dragStartY=0,dragStartTop=0;
+    thumb.addEventListener("pointerdown",e=>{
+      dragging=true; thumb.classList.add("dragging");
+      dragStartY=e.clientY; dragStartTop=parseFloat(thumb.style.top)||0;
+      thumb.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    thumb.addEventListener("pointermove",e=>{
+      if(!dragging)return;
+      const trackH=scrollWrap.clientHeight;
+      const thumbH=thumb.offsetHeight;
+      const travel=trackH-thumbH;
+      const baseY=term.buffer.active.baseY;
+      if(travel<=0||baseY<=0)return;
+      const newTop=Math.max(0,Math.min(travel,dragStartTop+(e.clientY-dragStartY)));
+      thumb.style.top=newTop+"px";
+      term.scrollToLine(Math.round((newTop/travel)*baseY));
+    });
+    thumb.addEventListener("pointerup",e=>{
+      dragging=false; thumb.classList.remove("dragging");
+      try{thumb.releasePointerCapture(e.pointerId);}catch{}
+    });
+
     const proto=location.protocol==="https:"?"wss:":"ws:";
-    const socket=new WebSocket(`${proto}//${location.host}/ws/terminal/${host}`);
-    socket.onmessage=ev=>term.write(ev.data);
-    // Optional boot command (e.g. launching `claude`). Sent once the shell is
-    // actually up rather than on socket open, or it lands before the prompt.
-    if(run){
-      let sent=false;
-      const armed=setTimeout(()=>{ if(!sent&&socket.readyState===WebSocket.OPEN){sent=true;socket.send(run+"\n");} },1200);
-      tab.cancelBoot=()=>clearTimeout(armed);
-    }
-    socket.onclose=()=>term.write("\r\n[connection closed]\r\n");
-    term.onData(data=>{if(socket.readyState===WebSocket.OPEN)socket.send(data)});
-    tab.term=term; tab.socket=socket; tab.fitAddon=fitAddon;
+    // tmux=<name>: the server wraps the shell in `tmux new-session -A -s
+    // <name>` instead of a bare login shell, so the session survives a
+    // dropped WebSocket, a closed tab, or a looking-glass service restart —
+    // reopening the same host+session reattaches to exactly where it was
+    // left, rather than losing whatever was running (found this mattered
+    // the hard way: a HUD restart mid-session used to just kill the pty).
+    const qs=tmux?`?tmux=${encodeURIComponent(tmux)}`:"";
+    // The remote pty's window size is fixed at whatever it started with —
+    // asyncssh never learns about later fitAddon.fit() calls. Left alone,
+    // the shell/tmux keeps wrapping and redrawing for a stale size while
+    // xterm.js renders at the real one, which shows up as garbled/
+    // overlapping text on long output. Ship every resize to the server as a
+    // BINARY frame so it can never be confused with raw keystroke text (sent
+    // as text frames below) and land as literal input in the shell.
+    let socket=null;
+    const sendResize=()=>{
+      if(!socket||socket.readyState!==WebSocket.OPEN)return;
+      const bytes=new TextEncoder().encode(JSON.stringify({cols:term.cols,rows:term.rows}));
+      socket.send(bytes.buffer);
+    };
+    // Registered once (not per-connect): xterm's onData is an event emitter,
+    // not a property assignment, so registering it inside connect() would
+    // stack a new listener on every reconnect and echo each keystroke that
+    // many times. It always reads the CURRENT `socket` via closure, so it
+    // stays correct across reconnects without re-registering.
+    term.onData(data=>{if(socket&&socket.readyState===WebSocket.OPEN)socket.send(data)});
+    term.onResize(sendResize);
+
+    let reconnectAttempts=0, reconnectTimer=null, bootSent=false;
+    const connect=()=>{
+      socket=new WebSocket(`${proto}//${location.host}/ws/terminal/${host}${qs}`);
+      tab.socket=socket;
+      socket.onmessage=ev=>term.write(ev.data,syncScrollRange);
+      socket.addEventListener("open",()=>{ reconnectAttempts=0; sendResize(); });
+      // Optional boot command (e.g. launching `claude`). Sent once the shell
+      // is actually up rather than on socket open, or it lands before the
+      // prompt. bootSent is shared across reconnects so a re-attach never
+      // replays it into a session that's already mid-command.
+      if(run && !bootSent){
+        const armed=setTimeout(()=>{
+          if(!bootSent && socket.readyState===WebSocket.OPEN){ bootSent=true; socket.send(run+"\n"); }
+        },1200);
+        tab.cancelBoot=()=>clearTimeout(armed);
+      }
+      socket.onclose=()=>{
+        if(tab.closed)return;
+        // A bare (non-tmux) shell has no server-side session to reattach to
+        // -- auto-reconnecting would silently hand back a brand-new shell,
+        // which reads as more confusing than an explicit dead end. Only
+        // tmux-backed sessions (the QUICK ACCESS tiles, and anything opened
+        // with a tmux name) get auto-reconnect, since reattaching there
+        // really does resume exactly where things were left -- the same
+        // thing manually closing and reopening the tab already did, minus
+        // the manual step. See the keepalive_interval comment on
+        // server.py's terminal_websocket for why disconnects happen at all.
+        if(!tmux){ term.write("\r\n[connection closed]\r\n"); return; }
+        reconnectAttempts++;
+        const delaySec=Math.min(reconnectAttempts,5);
+        term.write(`\r\n[connection lost, reconnecting in ${delaySec}s...]\r\n`);
+        reconnectTimer=setTimeout(connect,delaySec*1000);
+      };
+    };
+    connect();
+    tab.term=term; tab.fitAddon=fitAddon;
+    tab.onBeforeClose=()=>{ tab.closed=true; clearTimeout(reconnectTimer); };
 
     // Refit whenever the panel ACTUALLY changes size, rather than guessing
     // when. Sidebar hide/show and split view are 0.28s CSS transitions, so a
@@ -618,7 +735,7 @@ function openTerminal(host,{run=null,title=null}={}){
         clearTimeout(pending);
         pending=setTimeout(()=>{
           const r=panel.getBoundingClientRect();
-          if(r.width>0 && r.height>0){ try{ fitAddon.fit(); }catch{} }
+          if(r.width>0 && r.height>0){ try{ fitAddon.fit(); syncScrollRange(); }catch{} }
         },60);
       });
       ro.observe(panel);
@@ -639,7 +756,10 @@ addEventListener("resize",()=>{
 });
 
 document.querySelectorAll(".terminal-tile").forEach(btn=>{
-  btn.addEventListener("click",()=>openTerminal(btn.dataset.host));
+  // Prewired tmux session per host ("main") so QUICK ACCESS is actually
+  // quick access: same button always lands you back in the same live
+  // session instead of a fresh throwaway shell.
+  btn.addEventListener("click",()=>openTerminal(btn.dataset.host,{tmux:"main"}));
 });
 
 /* Buttons are wired here rather than with inline onclick= attributes: a

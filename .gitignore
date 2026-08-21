@@ -27,3 +27,6 @@ server/hud/jarvis.cer
 
 # Piper TTS voices (296MB of .onnx) — downloaded at setup, never committed
 server/models/
+
+# editor/session backup snapshots
+*.bak-*
