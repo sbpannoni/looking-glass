@@ -2130,6 +2130,26 @@ async def kanban_board() -> JSONResponse:
 _TASK_ID_RE = re.compile(r"^t_[0-9a-f]{6,}$")
 
 
+@app.post("/api/kanban/unblock")
+async def kanban_unblock(request: Request) -> JSONResponse:
+    """Returns a blocked card to ready (or todo, if its parents are still
+    open) via `hermes kanban unblock <id>` -- same native-subcommand,
+    previously-unexposed pattern as /api/kanban/archive below. No --reason
+    prompt: single click, server-side is the only gate, matching the rest
+    of this HUD's kanban actions."""
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    try:
+        rc, out = await _kanban_ssh(f"hermes kanban unblock {shlex.quote(task_id)}")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": out[-1000:]}, status_code=502)
+    return JSONResponse({"ok": True})
+
+
 @app.post("/api/kanban/archive")
 async def kanban_archive(request: Request) -> JSONResponse:
     """The review-then-deemphasize mechanism for a done card: archives it

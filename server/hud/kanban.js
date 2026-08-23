@@ -47,19 +47,19 @@ function kanbanAge(task){
   return h < 24 ? h+"h" : Math.floor(h/24)+"d";
 }
 
-async function kanbanArchive(panel, id, btn){
+async function kanbanCardAction(panel, endpoint, verb, id, btn){
   btn.disabled = true;
-  btn.textContent = "Archiving…";
+  btn.textContent = verb + "ing…";
   try{
-    const r = await fetch("/api/kanban/archive", {
+    const r = await fetch(endpoint, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({task_id: id}),
     });
     const j = await r.json();
-    if(!j.ok){ btn.disabled = false; btn.textContent = "Archive failed — retry"; return; }
+    if(!j.ok){ btn.disabled = false; btn.textContent = verb + " failed — retry"; return; }
     refreshKanbanPanel(panel);
-  }catch(err){ btn.disabled = false; btn.textContent = "Archive failed — retry"; }
+  }catch(err){ btn.disabled = false; btn.textContent = verb + " failed — retry"; }
 }
 
 function renderKanban(panel, tasks, err){
@@ -77,14 +77,18 @@ function renderKanban(panel, tasks, err){
       </div>
       <div class="kb-title">${(t.title||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]))}</div>
       <div class="kb-meta">${t.assignee||"—"} · ${t.id}</div>
-      ${t.status === "done" ? `<button class="btn kb-archive-btn" data-id="${t.id}">Archive</button>` : ""}
+      ${t.status === "blocked" ? `<button class="btn kb-archive-btn" data-action="unblock" data-id="${t.id}">Unblock</button>` : ""}
+      ${t.status === "done" ? `<button class="btn kb-archive-btn" data-action="archive" data-id="${t.id}">Archive</button>` : ""}
     </div>`;
   }).join("");
   list.querySelectorAll(".kb-card").forEach(card=>{
     card.onclick = (e) => { if(e.target.closest(".kb-archive-btn")) return; openTaskLog(card.dataset.id); };
   });
-  list.querySelectorAll(".kb-archive-btn").forEach(btn=>{
-    btn.onclick = (e) => { e.stopPropagation(); kanbanArchive(panel, btn.dataset.id, btn); };
+  list.querySelectorAll(".kb-archive-btn[data-action=\"unblock\"]").forEach(btn=>{
+    btn.onclick = (e) => { e.stopPropagation(); kanbanCardAction(panel, "/api/kanban/unblock", "Unblock", btn.dataset.id, btn); };
+  });
+  list.querySelectorAll(".kb-archive-btn[data-action=\"archive\"]").forEach(btn=>{
+    btn.onclick = (e) => { e.stopPropagation(); kanbanCardAction(panel, "/api/kanban/archive", "Archive", btn.dataset.id, btn); };
   });
 }
 

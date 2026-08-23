@@ -64,22 +64,22 @@ function swSubRow(entry){
   const cls = (typeof KANBAN_STATUS_CLASS !== "undefined" ? KANBAN_STATUS_CLASS[status] : "") || "";
   const age = (entry.task && typeof kanbanAge === "function") ? kanbanAge(entry.task) : "";
   const archived = status === "archived";
-  const showArchive = status === "done";
   return `<div class="sw-sub-row${archived?" sw-sub-archived":""}" data-id="${entry.id}">
     <div class="sw-sub-top">
       <b class="${cls}">${submitWorkEsc(status)}</b>
       <span class="sw-sub-age">${age}</span>
     </div>
     <div class="sw-sub-title">${submitWorkEsc(entry.title)}</div>
-    ${showArchive ? `<button class="btn sw-sub-archive-btn" data-id="${entry.id}">Archive</button>` : ""}
+    ${status === "blocked" ? `<button class="btn sw-sub-archive-btn" data-action="unblock" data-id="${entry.id}">Unblock</button>` : ""}
+    ${status === "done" ? `<button class="btn sw-sub-archive-btn" data-action="archive" data-id="${entry.id}">Archive</button>` : ""}
   </div>`;
 }
 
-async function swSubsArchive(panel, id, btn){
+async function swSubsAction(panel, endpoint, verb, id, btn){
   btn.disabled = true;
-  btn.textContent = "Archiving…";
+  btn.textContent = verb + "ing…";
   try{
-    const r = await fetch("/api/kanban/archive", {
+    const r = await fetch(endpoint, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({task_id: id}),
@@ -87,13 +87,13 @@ async function swSubsArchive(panel, id, btn){
     const j = await r.json();
     if(!j.ok){
       btn.disabled = false;
-      btn.textContent = "Archive failed — retry";
+      btn.textContent = verb + " failed — retry";
       return;
     }
     swSubsRefresh(panel);
   }catch(err){
     btn.disabled = false;
-    btn.textContent = "Archive failed — retry";
+    btn.textContent = verb + " failed — retry";
   }
 }
 
@@ -128,8 +128,11 @@ async function swSubsRefresh(panel){
         if(typeof openTaskLog === "function") openTaskLog(row.dataset.id);
       };
     });
-    group.querySelectorAll(".sw-sub-archive-btn").forEach(btn => {
-      btn.onclick = () => swSubsArchive(panel, btn.dataset.id, btn);
+    group.querySelectorAll(".sw-sub-archive-btn[data-action=\"unblock\"]").forEach(btn => {
+      btn.onclick = () => swSubsAction(panel, "/api/kanban/unblock", "Unblock", btn.dataset.id, btn);
+    });
+    group.querySelectorAll(".sw-sub-archive-btn[data-action=\"archive\"]").forEach(btn => {
+      btn.onclick = () => swSubsAction(panel, "/api/kanban/archive", "Archive", btn.dataset.id, btn);
     });
   });
 }
