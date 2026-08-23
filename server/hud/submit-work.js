@@ -24,6 +24,116 @@ function submitWorkEsc(s){
   return (s||"").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 }
 
+/* ---------------------------- MY SUBMISSIONS -------------------------
+   Cards filed from this panel, tracked client-side (localStorage — there
+   is no "created via submit-work" flag on the board itself) and grouped
+   into three buckets against live /api/kanban status: PENDING (still
+   working its way to a run), NEEDS FOLLOW-UP (blocked/awaiting review),
+   FINISHED (done/archived). A done card gets an Archive button here —
+   the review-then-deemphasize mechanism, via POST /api/kanban/archive
+   (hermes kanban archive <id>), which the HUD didn't expose before.
+======================================================================= */
+const SW_SUBS_KEY = "lg-sw-submissions";
+const SW_BUCKET_OF = {
+  triage:"pending", todo:"pending", ready:"pending", scheduled:"pending", running:"pending",
+  blocked:"followup", review:"followup",
+  done:"finished", archived:"finished",
+};
+const SW_BUCKETS = [
+  {key:"pending", label:"PENDING"},
+  {key:"followup", label:"NEEDS FOLLOW-UP"},
+  {key:"finished", label:"FINISHED"},
+];
+
+function swSubsLoad(){
+  try{ return JSON.parse(localStorage.getItem(SW_SUBS_KEY) || "[]"); }
+  catch{ return []; }
+}
+function swSubsSave(list){
+  try{ localStorage.setItem(SW_SUBS_KEY, JSON.stringify(list.slice(-50))); }
+  catch{ /* private mode / storage disabled — tracker just won't persist */ }
+}
+function swSubsAdd(id, title){
+  const list = swSubsLoad().filter(x => x.id !== id);
+  list.push({id, title, submittedAt: Date.now()});
+  swSubsSave(list);
+}
+
+function swSubRow(entry){
+  const status = entry.status || "unknown";
+  const cls = (typeof KANBAN_STATUS_CLASS !== "undefined" ? KANBAN_STATUS_CLASS[status] : "") || "";
+  const age = (entry.task && typeof kanbanAge === "function") ? kanbanAge(entry.task) : "";
+  const archived = status === "archived";
+  const showArchive = status === "done";
+  return `<div class="sw-sub-row${archived?" sw-sub-archived":""}" data-id="${entry.id}">
+    <div class="sw-sub-top">
+      <b class="${cls}">${submitWorkEsc(status)}</b>
+      <span class="sw-sub-age">${age}</span>
+    </div>
+    <div class="sw-sub-title">${submitWorkEsc(entry.title)}</div>
+    ${showArchive ? `<button class="btn sw-sub-archive-btn" data-id="${entry.id}">Archive</button>` : ""}
+  </div>`;
+}
+
+async function swSubsArchive(panel, id, btn){
+  btn.disabled = true;
+  btn.textContent = "Archiving…";
+  try{
+    const r = await fetch("/api/kanban/archive", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({task_id: id}),
+    });
+    const j = await r.json();
+    if(!j.ok){
+      btn.disabled = false;
+      btn.textContent = "Archive failed — retry";
+      return;
+    }
+    swSubsRefresh(panel);
+  }catch(err){
+    btn.disabled = false;
+    btn.textContent = "Archive failed — retry";
+  }
+}
+
+async function swSubsRefresh(panel){
+  const entries = swSubsLoad();
+  const buckets = {pending: [], followup: [], finished: []};
+  if(entries.length){
+    try{
+      const r = await fetch("/api/kanban");
+      const j = await r.json();
+      const byId = new Map((j.tasks||[]).map(t => [t.id, t]));
+      entries.slice().reverse().forEach(entry => {
+        const task = byId.get(entry.id);
+        const status = task ? task.status : null;
+        const bucket = SW_BUCKET_OF[status] || "pending";
+        buckets[bucket].push({...entry, status, task});
+      });
+    }catch(err){
+      entries.slice().reverse().forEach(entry => buckets.pending.push({...entry, status: null}));
+    }
+  }
+  SW_BUCKETS.forEach(({key}) => {
+    const group = panel.querySelector(`.sw-sub-group[data-bucket="${key}"] .sw-sub-list`);
+    if(!group) return;
+    const rows = buckets[key];
+    group.innerHTML = rows.length
+      ? rows.map(swSubRow).join("")
+      : `<div class="sw-sub-empty">none</div>`;
+    group.querySelectorAll(".sw-sub-row").forEach(row => {
+      row.onclick = (e) => {
+        if(e.target.closest(".sw-sub-archive-btn")) return;
+        if(typeof openTaskLog === "function") openTaskLog(row.dataset.id);
+      };
+    });
+    group.querySelectorAll(".sw-sub-archive-btn").forEach(btn => {
+      btn.onclick = () => swSubsArchive(panel, btn.dataset.id, btn);
+    });
+  });
+}
+
 function submitWorkRow(item){
   const disabled = item.blocked;
   const cls = ["sw-row"];
@@ -112,7 +222,11 @@ async function submitWorkSubmit(panel){
       submitWorkSelected = null;
       submitWorkRenderList(panel, panel.querySelector(".sw-filter").value);
       submitWorkRenderSelected(panel);
-      if (taskId !== "?" && typeof openTaskLog === "function") openTaskLog(taskId);
+      if (taskId !== "?"){
+        swSubsAdd(taskId, item.title);
+        swSubsRefresh(panel);
+        if (typeof openTaskLog === "function") openTaskLog(taskId);
+      }
     }else{
       status.innerHTML = `<div class="kv"><span class="err">${submitWorkEsc(j.error || "unknown error")}</span></div>`;
     }
@@ -137,11 +251,22 @@ function openSubmitWork(){
         <textarea class="sw-notes" placeholder="anything to add or override…"></textarea>
         <button class="btn sw-submit" disabled>Submit to Hermes</button>
         <div class="sw-status"></div>
+        <div class="flow-head-bar">MY SUBMISSIONS</div>
+        <div class="sw-subs">
+          ${SW_BUCKETS.map(b => `
+            <div class="sw-sub-group" data-bucket="${b.key}">
+              <div class="sw-sub-label">${b.label}</div>
+              <div class="sw-sub-list"><div class="sw-sub-empty">loading…</div></div>
+            </div>`).join("")}
+        </div>
       </div>
     `;
     panel.querySelector(".sw-filter").oninput = (e) => submitWorkRenderList(panel, e.target.value);
     panel.querySelector(".sw-submit").onclick = () => submitWorkSubmit(panel);
     submitWorkLoad(panel);
+    swSubsRefresh(panel);
+    const iv = setInterval(() => swSubsRefresh(panel), 15000);
+    tab.onBeforeClose = () => clearInterval(iv);
   });
 }
 

@@ -47,6 +47,21 @@ function kanbanAge(task){
   return h < 24 ? h+"h" : Math.floor(h/24)+"d";
 }
 
+async function kanbanArchive(panel, id, btn){
+  btn.disabled = true;
+  btn.textContent = "Archiving…";
+  try{
+    const r = await fetch("/api/kanban/archive", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({task_id: id}),
+    });
+    const j = await r.json();
+    if(!j.ok){ btn.disabled = false; btn.textContent = "Archive failed — retry"; return; }
+    refreshKanbanPanel(panel);
+  }catch(err){ btn.disabled = false; btn.textContent = "Archive failed — retry"; }
+}
+
 function renderKanban(panel, tasks, err){
   const list = panel.querySelector(".kb-list");
   if(err){ list.innerHTML = `<div class="kv"><span class="err">board unavailable: ${err}</span></div>`; return; }
@@ -54,17 +69,22 @@ function renderKanban(panel, tasks, err){
   list.innerHTML = tasks.map(t=>{
     const cls = KANBAN_STATUS_CLASS[t.status] ?? "";
     const live = t.status === "running";
-    return `<div class="kb-card${live?" live":""}" data-id="${t.id}">
+    const archived = t.status === "archived";
+    return `<div class="kb-card${live?" live":""}${archived?" archived":""}" data-id="${t.id}">
       <div class="kb-row">
         <b class="${cls}">${t.status}${live?" ●":""}</b>
         <span class="kb-age">${kanbanAge(t)}</span>
       </div>
       <div class="kb-title">${(t.title||"").replace(/[<>&]/g,c=>({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]))}</div>
       <div class="kb-meta">${t.assignee||"—"} · ${t.id}</div>
+      ${t.status === "done" ? `<button class="btn kb-archive-btn" data-id="${t.id}">Archive</button>` : ""}
     </div>`;
   }).join("");
   list.querySelectorAll(".kb-card").forEach(card=>{
-    card.onclick = () => openTaskLog(card.dataset.id);
+    card.onclick = (e) => { if(e.target.closest(".kb-archive-btn")) return; openTaskLog(card.dataset.id); };
+  });
+  list.querySelectorAll(".kb-archive-btn").forEach(btn=>{
+    btn.onclick = (e) => { e.stopPropagation(); kanbanArchive(panel, btn.dataset.id, btn); };
   });
 }
 
