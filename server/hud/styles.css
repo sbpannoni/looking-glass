@@ -509,12 +509,18 @@ footer{
 .kb-title{font-size:13px; margin:3px 0 2px}
 .kb-meta{font-size:10px; color:var(--txt-dim)}
 .tasklog-pane{overflow:hidden; min-height:0}
-.work-panel.active.tasklog-pane{display:flex}
+.work-panel.active.tasklog-pane{display:flex; flex-direction:column}
 .kb-log{
   flex:1 1 auto; min-height:0; margin:0; overflow:auto; white-space:pre-wrap; word-break:break-word;
   font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11.5px; line-height:1.35;
   color:#cfe3ee; background:#04070d; border-radius:8px; padding:10px;
 }
+.kb-log-status{
+  flex:0 0 auto; font-size:11px; padding:6px 10px; margin-bottom:6px;
+  border:1px solid var(--line); border-radius:6px;
+  background:color-mix(in srgb, var(--panel) 70%, transparent);
+}
+.kb-log-status b{font-family:'Orbitron'; font-size:9px; letter-spacing:1px}
 
 /* ---- backend service control rows ---- */
 .svc-row{padding:4px 0}
@@ -632,3 +638,100 @@ body.view-map #work-area{display:none !important}
 .proj-repo{font-size:9px; color:var(--magenta); letter-spacing:.5px;
   margin:1px 0 4px 0; opacity:.85; line-height:1.3}
 .proj-untracked{font-size:9px; color:var(--txt-dim); font-weight:400}
+
+/* ---------------- coder-engine transit map ---------------- */
+/* min-width is load-bearing for readability: this SVG's text is sized in
+   viewBox units, so a plain width:100% shrinks the whole diagram -- and
+   every label with it -- to fit whatever the panel happens to be, which on
+   a typical (sub-1300px) panel width made 12px labels render well under
+   8px on screen. Letterboxing (scroll instead of shrink) below its near-
+   native size keeps every label at its authored, readable size; the wrap's
+   overflow-x:auto is what makes that scrollable instead of clipped. */
+.tm-svg-wrap{padding:10px 10px 4px; overflow-x:auto}
+.tm-svg{display:block; width:100%; min-width:1150px; height:auto}
+
+.tm-line-section{border-bottom:1px solid var(--line)}
+.tm-line-section summary{cursor:pointer; user-select:none; list-style:none}
+.tm-line-section summary::-webkit-details-marker{display:none}
+.tm-line-section summary::before{content:"▸"; display:inline-block; width:10px;
+  margin-right:4px; transition:transform .15s}
+.tm-line-section[open] summary::before{transform:rotate(90deg)}
+.tm-line-section .flow-grid{padding:8px 10px}
+/* Bumped from 12/9.5/10.5px, 2026-08-22 -- readability pass. The min-width
+   fix above stops shrink-induced illegibility; this bump is the second,
+   independent half of it -- these were genuinely small even at full,
+   unshrunk scale. */
+.tm-station-label{font-family:'Orbitron'; font-size:14.5px; fill:var(--txt); letter-spacing:.3px}
+.tm-station-sub{font-family:'Rajdhani'; font-size:11px; fill:var(--txt-dim)}
+.tm-line-tag{font-family:'Orbitron'; font-weight:700; font-size:14.5px; letter-spacing:1.5px}
+.tm-metric-chip{font-family:'Rajdhani'; font-size:12.5px; font-weight:600}
+.tm-terminus-label{font-family:'Orbitron'; font-size:15px; font-weight:700; fill:var(--txt)}
+.tm-station-dot{filter:drop-shadow(0 0 3px currentColor)}
+
+/* Role-assignment dropdown bar: surfaces the model actually configured per
+   role (distinct from the ranked-by-score leaderboard cards below) and
+   lets it be changed live. See coder-transit-map.js's transitRoleBar(). */
+.tm-role-bar{display:flex; flex-wrap:wrap; gap:16px; align-items:center;
+  padding:9px 10px; border-bottom:1px solid var(--line); background:#050d16cc}
+.tm-role-item{display:flex; align-items:center; gap:6px}
+.tm-role-label{font-family:'Orbitron'; font-size:10px; letter-spacing:1.2px;
+  color:var(--txt-dim); text-transform:uppercase}
+.tm-role-select{background:var(--panel); color:var(--txt); border:1px solid var(--line);
+  border-radius:3px; padding:4px 6px; font-family:'Rajdhani'; font-size:12.5px;
+  font-weight:600; cursor:pointer; max-width:200px}
+.tm-role-select:hover{border-color:var(--cyan)}
+.tm-role-select:focus{outline:1px solid var(--cyan); outline-offset:1px}
+.tm-role-live{font-size:9px; letter-spacing:.5px; color:var(--teal);
+  border:1px solid var(--teal); border-radius:2px; padding:1px 4px}
+.tm-role-notlive{font-size:9px; letter-spacing:.5px; color:var(--txt-dim);
+  border:1px solid var(--line); border-radius:2px; padding:1px 4px}
+.tm-role-status{font-size:10px; color:var(--txt-dim); min-width:44px}
+.tm-role-status.saved{color:var(--teal)}
+.tm-role-status.err{color:var(--red)}
+
+/* Reviewer role's live trigger (POST /api/review-file -> a --triage kanban
+   card). Lives inside the REVIEWER LINE <details>, above its leaderboard. */
+.tm-review-trigger{display:flex; align-items:center; gap:8px; padding:8px 10px;
+  border-bottom:1px dashed var(--line)}
+.tm-review-input{flex:1; min-width:0; background:var(--panel); color:var(--txt);
+  border:1px solid var(--line); border-radius:3px; padding:5px 7px;
+  font-family:'Rajdhani'; font-size:12px}
+.tm-review-input:focus{outline:1px solid var(--magenta); outline-offset:1px}
+button.tm-review-btn{border-color:var(--magenta); color:var(--magenta);
+  font-size:10px; padding:6px 10px; flex-shrink:0}
+button.tm-review-btn:hover{background:#3a0a33; box-shadow:0 0 10px #ff2fd044}
+button.tm-review-btn:disabled{opacity:.5; cursor:default; box-shadow:none}
+.tm-review-status{font-size:10px; color:var(--txt-dim); flex-shrink:0; max-width:260px;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.tm-review-status.saved{color:var(--teal)}
+.tm-review-status.err{color:var(--red)}
+
+/* ---------------- submit work (darkhelix todo) ---------------- */
+.sw-body{display:flex; flex-direction:column; gap:0; min-height:0; flex:1 1 auto; overflow-y:auto}
+.sw-filter{
+  margin:10px; padding:8px 10px; font-family:'Rajdhani'; font-size:13px;
+  background:#0a1420; color:var(--txt); border:1px solid var(--line); outline:none;
+}
+.sw-filter:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+.sw-list{max-height:34vh; overflow-y:auto; padding:0 10px 6px; display:flex; flex-direction:column; gap:4px}
+.sw-row{
+  border:1px solid var(--line); border-left:2px solid var(--cyan); background:#050d16cc;
+  padding:6px 9px; cursor:pointer; transition:border-color .15s, background .15s;
+}
+.sw-row:hover{border-color:var(--cyan)}
+.sw-row-selected{background:#0a2435; border-left-color:var(--teal); border-color:var(--teal)}
+.sw-row-blocked{opacity:.4; cursor:not-allowed; border-left-color:var(--txt-dim)}
+.sw-row-section{font-family:'Orbitron'; font-size:8.5px; letter-spacing:1px; color:var(--txt-dim); text-transform:uppercase}
+.sw-row-title{font-size:12px; color:var(--txt); margin-top:2px}
+.sw-row-title .badge{margin-left:6px}
+.sw-selected{padding:8px 12px; font-size:12px; color:var(--txt-dim); max-height:16vh; overflow-y:auto}
+.sw-selected-text{white-space:normal; line-height:1.5}
+.sw-notes{
+  margin:10px; padding:8px 10px; font-family:'Rajdhani'; font-size:13px;
+  background:#0a1420; color:var(--txt); border:1px solid var(--line); outline:none;
+  min-height:70px; resize:vertical;
+}
+.sw-notes:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+.sw-submit{margin:0 10px 6px; align-self:flex-start}
+.sw-submit:disabled{opacity:.4; cursor:not-allowed}
+.sw-status{padding:0 10px 10px}

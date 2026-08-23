@@ -20,6 +20,41 @@ function coderModelDot(status){
   return "na";
 }
 
+// Sort into sections so the panel reads best-info-first instead of
+// insertion order (which was just "whatever order candidates got added"):
+// resident/rotation models, then tested candidates ranked by pass rate
+// (the actual decision-relevant number), then untested/pending downloads,
+// then hardware-incompatible ones ruled out entirely.
+function coderModelBucket(d){
+  const status = d.status || "";
+  if (status === "resident default") return 0;
+  if (status.startsWith("resident")) return 1;
+  if (status.startsWith("incompatible")) return 4;
+  if (!d.metrics || d.metrics.total_runs == null) return 3;
+  return 2;
+}
+
+const CODER_BUCKET_LABEL = {
+  0: "RESIDENT / ROTATION",
+  1: "RESIDENT / ROTATION",
+  2: "TESTED — RANKED BY PASS RATE",
+  3: "AWAITING EVAL",
+  4: "RULED OUT — HARDWARE INCOMPATIBLE",
+};
+
+function sortCoderModels(models){
+  return models.slice().sort((a,b)=>{
+    const ba = coderModelBucket(a), bb = coderModelBucket(b);
+    if (ba !== bb) return ba - bb;
+    if (ba === 2){
+      const pa = a.metrics && a.metrics.pass_rate != null ? a.metrics.pass_rate : -1;
+      const pb = b.metrics && b.metrics.pass_rate != null ? b.metrics.pass_rate : -1;
+      if (pb !== pa) return pb - pa;
+    }
+    return 0;
+  });
+}
+
 function coderMetricsBlock(m){
   if (!m){
     return `<div class="mcard-metrics mcard-none">no runs yet</div>`;
@@ -50,16 +85,36 @@ function coderModelCard(d){
   </div>`;
 }
 
+function coderModelSections(models){
+  const sorted = sortCoderModels(models);
+  let html = "";
+  let lastBucket = null;
+  let cards = [];
+  const flush = () => {
+    if (!cards.length) return;
+    html += `<div class="flow-head-bar mcard-section-bar">${CODER_BUCKET_LABEL[lastBucket]}</div>
+             <div class="flow-grid mcard-grid">${cards.join("")}</div>`;
+    cards = [];
+  };
+  for (const d of sorted){
+    const bucket = coderModelBucket(d);
+    if (lastBucket !== null && bucket !== lastBucket && !(lastBucket === 0 && bucket === 1)) flush();
+    lastBucket = bucket;
+    cards.push(coderModelCard(d));
+  }
+  flush();
+  return html;
+}
+
 async function renderCoderModels(panel){
   try{
     const r = await fetch("/api/coder-models");
     const j = await r.json();
-    const cards = (j.models||[]).map(coderModelCard).join("");
     const gen = j.metrics_generated_at
       ? `metrics refreshed ${new Date(j.metrics_generated_at).toLocaleString()} from ${j.metrics_source||"?"}`
       : "metrics not yet refreshed — run homelab/coder_models_refresh.py on claude-control";
     panel.innerHTML = `<div class="flow-head-bar">CODER-ENGINE MODEL ROSTER — ${gen}</div>
-                       <div class="flow-grid mcard-grid">${cards}</div>`;
+                       ${coderModelSections(j.models||[])}`;
   }catch(err){
     panel.innerHTML = `<div class="kv"><span class="err">coder models unavailable: ${err.message}</span></div>`;
   }

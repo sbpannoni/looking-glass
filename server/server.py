@@ -1377,6 +1377,33 @@ PROJECTS_CACHE: dict = {"ts": 0.0, "data": {}}
 CODER_MODELS_METRICS_PATH = os.path.join(
     os.path.dirname(__file__), "config", "coder_model_metrics.json"
 )
+# Same pull-then-push shape as CODER_MODELS_METRICS_PATH, just for the
+# reviewer role's catch-rate/false-positive-rate data (see coder_models_refresh.py
+# on claude-control -- one script refreshes both files).
+CODER_REVIEW_METRICS_PATH = os.path.join(
+    os.path.dirname(__file__), "config", "coder_review_metrics.json"
+)
+# Static "what is this line" text for the transit map's non-editor lines.
+# The reviewer line's per-model numbers come from CODER_REVIEW_METRICS_PATH;
+# this only holds the roles/labels/mechanism text that doesn't change per run.
+CODER_ORCH_METRICS_PATH = os.path.join(
+    os.path.dirname(__file__), "config", "coder_orchestrator_metrics.json"
+)
+# Static framing text for the orchestrator line -- the mechanism itself
+# (hermes kanban decompose/specify) is native and confirmed live; what CT110
+# refreshes via CODER_ORCH_METRICS_PATH is which candidate model is actually
+# good at driving it, benchmarked against real historically-grounded
+# decompositions (see pipeline/eval/tasks/orchestrator/*.yaml).
+CODER_TRANSIT_ORCHESTRATOR = {
+    "status": "native mechanism (hermes kanban decompose/specify), now benchmarked",
+    "note": (
+        "hermes kanban decompose/specify already does LLM-driven task "
+        "decomposition natively -- confirmed live, Revision 2 of the coder-engine "
+        "plan. This local harness grades a candidate's proposed breakdown "
+        "against the real, historically-grounded decomposition of an actual "
+        "past DARKHELIX fix -- never against the live kanban board."
+    ),
+}
 CODER_MODELS_ROSTER = [
     {
         "id": "qwen3.6-27b-awq", "label": "Qwen3.6 27B", "license": "Apache 2.0",
@@ -1384,7 +1411,7 @@ CODER_MODELS_ROSTER = [
         "status": "resident default",
         "good_for": "Current pipeline default. Cited by multiple community sources as "
                      "the highest verified SWE-bench Verified score among models that "
-                     "run on consumer hardware. General coding + reasoning.",
+                     "run on consumer hardware. General coding + reasoning. STABILITY-TESTED 2026-08-21: a --repeats 2 pass (plus one extra confirmatory run) put its true rate at 0.704 (19/27) -- higher than the original single-run 0.6 baseline, since one task (collab-compute-rpkm) that originally failed passed on all 3 retest attempts. A legitimate rival to Devstral now, not a clear-cut incumbent-vs-challenger case.",
     },
     {
         "id": "qwen2.5-32b-awq", "label": "Qwen2.5 32B", "license": "Apache 2.0",
@@ -1412,23 +1439,36 @@ CODER_MODELS_ROSTER = [
     {
         "id": "devstral-small-2-24b-awq", "label": "Devstral Small 2 24B", "license": "Apache 2.0",
         "params": "24B dense",
-        "status": "tested 2026-08-21 — 0.625 pass rate (best, tied)",
+        "status": "tested 2026-08-21 — 0.625 pass rate, CONFIRMED STABLE (best)",
         "good_for": "Purpose-built for agentic coding by Mistral + All Hands AI — "
                      "closest architectural match to what this pipeline actually does "
-                     "(multi-step repo edits, test-gated, SWE-bench-style tasks).",
+                     "(multi-step repo edits, test-gated, SWE-bench-style tasks). "
+                     "CONFIRMED 2026-08-21: a --repeats 2 stability pass reproduced the "
+                     "exact same outcome on every one of the 8 tasks across all 3 "
+                     "attempts (24 total runs) — the only candidate that fully stable. "
+                     "Also the fastest average time (60.3s) of the real contenders. "
+                     "Clear leader pending Sam's final lock.",
     },
     {
         "id": "deepseek-r1-distill-qwen-32b-awq", "label": "DeepSeek-R1-Distill-Qwen 32B", "license": "MIT",
         "params": "32B dense, reasoning-distilled from DeepSeek-R1",
-        "status": "tested 2026-08-21 — 0.625 pass rate (best, tied), ~3x slower than other candidates",
+        "status": "tested 2026-08-21 — 0.583 pass rate across repeats, NOT stable, ~2.2x slower",
         "good_for": "Reasoning-distilled onto a Qwen2.5-32B base. Tests whether "
                      "reasoning-trace training helps on small, well-scoped edit tasks "
-                     "vs. a plain instruct model of the same size.",
+                     "vs. a plain instruct model of the same size. CORRECTION "
+                     "2026-08-21: the original single-run 0.625 looked tied with "
+                     "Devstral, but a --repeats 2 stability pass shows it is NOT "
+                     "deterministic — collab-compute-rpkm flipped pass then fail/fail, "
+                     "and validation-read-candidates flipped fail then pass/fail across "
+                     "identical re-attempts. True stabilized rate across 24 runs is "
+                     "0.583, not 0.625, and it runs ~2.2x slower than Devstral on "
+                     "average (132.7s vs 60.3s) — reasoning-trace verbosity is the "
+                     "likely source of both.",
     },
     {
         "id": "qwen3-coder-30b-a3b-awq", "label": "Qwen3-Coder 30B-A3B", "license": "Apache 2.0",
         "params": "30.5B total / 3.3B active MoE (128 experts, 8 routed)",
-        "status": "tested 2026-08-21 — 0.5 pass rate, no instability seen",
+        "status": "tested 2026-08-21 — 0.5 pass rate, CONFIRMED STABLE, fast (avg 45s)",
         "good_for": "Coder-tuned MoE sibling of the resident default — fast inference "
                      "despite the total param count. Was flagged higher-risk (AWQ+MoE "
                      "instability reports elsewhere) but ran clean here: no crash-loop, "
@@ -1477,17 +1517,44 @@ CODER_MODELS_ROSTER = [
     {
         "id": "gemma-4-31b-it-awq", "label": "Gemma 4 31B", "license": "Apache 2.0",
         "params": "30.7B dense, multimodal (vision+video), 256K ctx",
-        "status": "candidate (downloading)",
+        "status": "incompatible — hardware ceiling, not a config issue",
         "good_for": "Google DeepMind's latest open dense model, ranked #3 on the Arena "
-                     "AI text leaderboard among open models as of release. Standard "
-                     "attention (no exotic kernel risk like Kimi/MiniMax). Multimodal "
-                     "checkpoint served text-only (--language-model-only, matching the "
-                     "Devstral pattern) since this pipeline only needs code editing.",
+                     "AI text leaderboard among open models as of release. RULED OUT "
+                     "2026-08-21: same Turing shared-memory ceiling as Kimi-Linear "
+                     "(65536 byte/SM hardware limit, this kernel needs 98304) but from a "
+                     "DIFFERENT cause -- standard attention, no exotic kernel like Kimi's "
+                     "KDA. Correction to the 'standard architecture = safe' assumption "
+                     "this entry was added under: the over-budget kernel here is "
+                     "architecture-config-dependent (likely AWQ Marlin dequant or the "
+                     "Triton attention kernel picking a large tile for the 5120 hidden "
+                     "dim), so a normal-looking dense model can still hit this wall. "
+                     "--enforce-eager didn't help (same kernel hit on first real request, "
+                     "not just CUDA graph capture). See eval_results.json's "
+                     "infra-startup record for the trace.",
+    },
+    {
+        "id": "qwen3.8-27b-abliterated-awq", "label": "Qwen3.8 27B (abliterated AWQ)", "license": "Apache 2.0",
+        "params": "27.8B dense, hybrid Gated DeltaNet + Gated Attention, AWQ W4A16, MTP preserved",
+        "status": "tested 2026-08-22 -- comparable to the INT8 quant, faster, no boot flakiness",
+        "good_for": "Same base model as qwen3.8-27b-int8-w8a16, different community quant "
+                     "(twolven/Qwen3.8-27B-abliterated-AWQ-MTP) -- tested to see whether a proper "
+                     "AWQ quant (this rig's proven format) sidesteps the INT8 quant's boot-flakiness "
+                     "and runaway-reasoning issues. RESULT: editor 0.625 (same), avg 128s (faster than "
+                     "248s), reviewer catch 2/3 (same), false-positive 1/3 (better than 2/3), "
+                     "orchestrator coverage 7/9 (slightly below the INT8 quant's 9/9). Booted clean, "
+                     "zero crash-loop restarts. Still hit the identical runaway-reasoning/empty-content "
+                     "bug on complex prompts even with its own bundled 'medium' chat template -- "
+                     "confirms the bug is a base-model trait, not specific to the INT8 quant or its "
+                     "template. IMPORTANT: this checkpoint is abliterated (safety/refusal training "
+                     "surgically removed) -- deployed only after Sam's explicit request and "
+                     "re-authorization past an auto-mode classifier block; a real policy "
+                     "consideration for a biodefense-adjacent pipeline, not just a performance "
+                     "number, and worth Sam's own ongoing judgment before it becomes a default.",
     },
     {
         "id": "qwen3.8-27b-int8-w8a16", "label": "Qwen3.8 27B (INT8)", "license": "Apache 2.0",
         "params": "27.78B dense, hybrid Gated DeltaNet + Gated Attention, 262K ctx (1M w/ YaRN)",
-        "status": "candidate (downloading)",
+        "status": "tested 2026-08-21 — 0.375 pass rate, slow (avg 209s), boot-flaky",
         "good_for": "Newer generation of the resident default's own architecture "
                      "family (qwen3.6-27b-awq is 'hybrid linear/full attention' too, "
                      "and has run clean all session) — lower kernel risk than a "
@@ -1496,7 +1563,11 @@ CODER_MODELS_ROSTER = [
                      "have no FP8 tensor cores at all (documented hard constraint), "
                      "so the FP8 quant would run poorly or not at all. INT8 has real "
                      "Turing tensor-core support. Multimodal checkpoint, served "
-                     "text-only.",
+                     "text-only. RESULT 2026-08-21: weakest of the real (non-ruled-out) "
+                     "candidates — 4/8 tasks hit the full 300s aider timeout, and the "
+                     "service itself needed --enforce-eager plus 6 systemd crash-loop "
+                     "restarts (RuntimeError: cancelled on the KV-cache-spec RPC "
+                     "handshake) before it would stay up.",
     },
 ]
 
@@ -1526,6 +1597,412 @@ async def coder_models() -> JSONResponse:
         "metrics_generated_at": metrics_blob.get("generated_at"),
         "metrics_source": metrics_blob.get("source"),
     })
+
+
+# Reviewer-role candidates share the same model catalog as the editor role
+# (CODER_MODELS_ROSTER) -- reuse its id->label/license lookup rather than
+# keeping a second roster in sync.
+_CODER_ROSTER_BY_ID = {entry["id"]: entry for entry in CODER_MODELS_ROSTER}
+
+
+@app.get("/api/coder-transit-map")
+async def coder_transit_map() -> JSONResponse:
+    """Combined editor + reviewer + orchestrator data for the coder-engine
+    TRANSIT MAP panel -- one subway-style diagram of every role the pipeline
+    needs a model for for, with each line's real metrics attached. Editor
+    reuses the same roster/metrics as /api/coder-models; reviewer reads
+    CODER_REVIEW_METRICS_PATH (refreshed by the same CT110 script); the
+    orchestrator line is static text since it has no eval data yet."""
+    editor_blob: dict = {}
+    try:
+        with open(CODER_MODELS_METRICS_PATH) as f:
+            editor_blob = json.load(f)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        editor_blob = {"_error": str(exc)}
+
+    review_blob: dict = {}
+    try:
+        with open(CODER_REVIEW_METRICS_PATH) as f:
+            review_blob = json.load(f)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        review_blob = {"_error": str(exc)}
+
+    editor_metrics = editor_blob.get("metrics", {})
+    editor_models = sorted(
+        (
+            {
+                "id": mid,
+                "label": _CODER_ROSTER_BY_ID.get(mid, {}).get("label", mid),
+                **m,
+            }
+            for mid, m in editor_metrics.items()
+            if m.get("pass_rate") is not None
+        ),
+        key=lambda m: m["pass_rate"],
+        reverse=True,
+    )
+
+    review_metrics = review_blob.get("metrics", {})
+    review_models = sorted(
+        (
+            {
+                "id": mid,
+                "label": _CODER_ROSTER_BY_ID.get(mid, {}).get("label", mid),
+                **m,
+            }
+            for mid, m in review_metrics.items()
+        ),
+        key=lambda m: (m.get("catch_rate") is None, -(m.get("catch_rate") or 0)),
+    )
+
+    orch_blob: dict = {}
+    try:
+        with open(CODER_ORCH_METRICS_PATH) as f:
+            orch_blob = json.load(f)
+    except FileNotFoundError:
+        pass
+    except Exception as exc:
+        orch_blob = {"_error": str(exc)}
+
+    orch_metrics = orch_blob.get("metrics", {})
+    orch_models = sorted(
+        (
+            {
+                "id": mid,
+                "label": _CODER_ROSTER_BY_ID.get(mid, {}).get("label", mid),
+                **m,
+            }
+            for mid, m in orch_metrics.items()
+        ),
+        key=lambda m: (m.get("coverage_rate") is None, -(m.get("coverage_rate") or 0)),
+    )
+
+    return JSONResponse({
+        "editor": {
+            "generated_at": editor_blob.get("generated_at"),
+            "total_runs": editor_blob.get("total_records"),
+            "models": editor_models,
+        },
+        "reviewer": {
+            "generated_at": review_blob.get("generated_at"),
+            "total_raw_records": review_blob.get("total_raw_records"),
+            "total_graded_records": review_blob.get("total_graded_records"),
+            "models": review_models,
+        },
+        "orchestrator": {
+            **CODER_TRANSIT_ORCHESTRATOR,
+            "generated_at": orch_blob.get("generated_at"),
+            "total_raw_records": orch_blob.get("total_raw_records"),
+            "total_graded_records": orch_blob.get("total_graded_records"),
+            "models": orch_models,
+        },
+    })
+
+
+MODEL_ROLE_ASSIGNMENTS_PATH = "/ssdpool/coder-engine/pipeline/model_role_assignments.json"
+MODEL_ROLE_NAMES = ("editor", "reviewer", "orchestrator")
+# "editor" is read live by dispatch_task.py on every real dispatch (see
+# _role_default_model() there). "orchestrator" is wired to Hermes's own
+# native decomposer/specifier (auxiliary.kanban_decomposer/triage_specifier
+# in ~/.hermes/config.yaml, CT111) -- the actual live mechanism behind
+# `hermes kanban decompose`/`specify`, confirmed live 2026-08-22 -- not a
+# second, disconnected config. "reviewer" drives POST /api/review-file
+# (dispatch_review_task.py on snarf), which runs a real review and files a
+# --triage kanban card -- never a higher status, so it proposes but never
+# acts unsupervised. See Phase 3.5 / snazzy-chasing-willow.md.
+MODEL_ROLE_LIVE = {"editor", "orchestrator", "reviewer"}
+
+HERMES_CONFIG_PATH = "/root/.hermes/config.yaml"
+HERMES_VENV_PY = "/usr/local/lib/hermes-agent/venv/bin/python3"
+_HERMES_AUX_SECTIONS = ("triage_specifier", "kanban_decomposer")
+
+
+def _hermes_aux_section_model(config_text: str, section: str) -> str | None:
+    """Pull `model: '...'` out of one auxiliary.<section> block. Bounded to
+    that block only (up to the next 2-space-indented key) so this can't
+    accidentally match a same-named key in a different section."""
+    marker = f"  {section}:\n"
+    if marker not in config_text:
+        return None
+    tail = config_text.split(marker, 1)[1]
+    m = re.search(r"^  \S", tail, re.MULTILINE)
+    block = tail[: m.start()] if m else tail
+    mm = re.search(r"^    model:\s*'([^']*)'", block, re.MULTILINE)
+    return mm.group(1) if mm else None
+
+
+def _hermes_global_default_model(config_text: str) -> str | None:
+    m = re.search(r"^model:\n(?:  .+\n)*?  default:\s*(\S+)", config_text, re.MULTILINE)
+    return m.group(1) if m else None
+
+
+async def _get_orchestrator_model() -> str | None:
+    """Effective model `hermes kanban decompose`/`specify` will actually use
+    right now: kanban_decomposer's own model if explicitly set, else the
+    global default it inherits from (provider: auto behavior) -- never a
+    blank string, since that's not what's really going to run."""
+    rc, out = await _fleet_ssh("hermes", f"cat {shlex.quote(HERMES_CONFIG_PATH)}")
+    if rc != 0:
+        raise RuntimeError(f"cat exited {rc}: {out[-500:]}")
+    explicit = _hermes_aux_section_model(out, "kanban_decomposer")
+    if explicit:
+        return explicit
+    return _hermes_global_default_model(out)
+
+
+async def _set_orchestrator_model(model: str) -> None:
+    """Pin both triage_specifier and kanban_decomposer to `model` explicitly
+    (provider: vllm, base_url matching the main model block's known-working
+    endpoint) rather than relying on 'auto' inheritance semantics that
+    aren't independently verifiable (Hermes is vendor software, no source
+    checkout -- see CLAUDE.md). Surgical, idempotent anchored-block text
+    replace, not a full YAML parse-and-dump: this is a large, hand-
+    maintained vendor config file with folded multi-line scalars (the
+    personality strings) a round-trip dump risks reformatting even when
+    semantically a no-op. Idempotent means this works from ANY prior state
+    of these two blocks (the pristine provider:auto/model:'' default, or a
+    value a previous call already set) -- it replaces whatever the
+    provider/model/base_url lines currently say, not a one-shot "auto ->
+    explicit" converter (an earlier version of this function was exactly
+    that and broke on the second call -- caught live 2026-08-22). Backs up
+    first, validates the result actually parses (Hermes's own bundled
+    PyYAML) before calling it done."""
+    rc, out = await _fleet_ssh("hermes", f"cat {shlex.quote(HERMES_CONFIG_PATH)}")
+    if rc != 0:
+        raise RuntimeError(f"cat exited {rc}: {out[-500:]}")
+
+    new_text = out
+    for section in _HERMES_AUX_SECTIONS:
+        marker = f"  {section}:\n"
+        if marker not in new_text:
+            raise RuntimeError(f"{section!r} block not found in config.yaml -- not touching it blind")
+        before, tail = new_text.split(marker, 1)
+        m = re.search(r"^  \S", tail, re.MULTILINE)
+        block = tail[: m.start()] if m else tail
+        rest = tail[m.start():] if m else ""
+
+        for key in ("provider:", "model:", "base_url:"):
+            if not re.search(rf"^    {re.escape(key)}", block, re.MULTILINE):
+                raise RuntimeError(
+                    f"{section!r} block is missing a {key!r} line -- "
+                    f"config.yaml's shape has changed; not touching it blind"
+                )
+
+        new_block = re.sub(r"^    provider:.*$", "    provider: vllm", block, count=1, flags=re.MULTILINE)
+        new_block = re.sub(r"^    model:.*$", f"    model: '{model}'", new_block, count=1, flags=re.MULTILINE)
+        new_block = re.sub(
+            r"^    base_url:.*$",
+            "    base_url: 'http://192.168.1.239:8000/v1'",
+            new_block, count=1, flags=re.MULTILINE,
+        )
+        new_text = before + marker + new_block + rest
+
+    backup_cmd = (
+        f"cp {shlex.quote(HERMES_CONFIG_PATH)} "
+        f"{shlex.quote(HERMES_CONFIG_PATH)}.bak-model-role-assignments"
+    )
+    rc_b, out_b = await _fleet_ssh("hermes", backup_cmd)
+    if rc_b != 0:
+        raise RuntimeError(f"backup failed, aborting write: {out_b[-500:]}")
+
+    write_cmd = f"printf %s {shlex.quote(new_text)} > {shlex.quote(HERMES_CONFIG_PATH)}"
+    rc_w, out_w = await _fleet_ssh("hermes", write_cmd)
+    if rc_w != 0:
+        raise RuntimeError(f"write failed: {out_w[-500:]}")
+
+    validate_cmd = (
+        f"{HERMES_VENV_PY} -c "
+        f"\"import yaml; yaml.safe_load(open({HERMES_CONFIG_PATH!r})); print('ok')\""
+    )
+    rc_v, out_v = await _fleet_ssh("hermes", validate_cmd)
+    if rc_v != 0 or "ok" not in out_v:
+        raise RuntimeError(
+            f"post-write validation failed (file may be malformed -- backup "
+            f"is at {HERMES_CONFIG_PATH}.bak-model-role-assignments): {out_v[-500:]}"
+        )
+
+
+@app.get("/api/model-role-assignments")
+async def model_role_assignments() -> JSONResponse:
+    """Current per-role model assignment. "editor"/"reviewer" come from
+    snarf's model_role_assignments.json -- the exact file dispatch_task.py
+    reads on every real dispatch for "editor", so a change from the TRANSIT
+    MAP panel takes effect on the next dispatch, no redeploy. "orchestrator"
+    is overlaid live from Hermes's own config (see _get_orchestrator_model)
+    since that's the role's real live mechanism, not this file. Also
+    returns the known model roster (id+label) so the HUD can populate each
+    dropdown from one source of truth (CODER_MODELS_ROSTER)."""
+    try:
+        rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(MODEL_ROLE_ASSIGNMENTS_PATH)}")
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"error": f"cat exited {rc}: {out[-500:]}"}, status_code=502)
+    try:
+        assignments = json.loads(out)
+    except json.JSONDecodeError:
+        return JSONResponse({"error": f"unparseable assignments file: {out[-500:]}"}, status_code=502)
+
+    try:
+        orch_model = await _get_orchestrator_model()
+        if orch_model:
+            assignments["orchestrator"] = orch_model
+    except Exception as exc:
+        assignments["_orchestrator_error"] = str(exc)
+
+    return JSONResponse({
+        "assignments": assignments,
+        "live_roles": sorted(MODEL_ROLE_LIVE),
+        "roster": [{"id": e["id"], "label": e["label"]} for e in CODER_MODELS_ROSTER],
+    })
+
+
+@app.post("/api/model-role-assignments")
+async def set_model_role_assignment(request: Request) -> JSONResponse:
+    """Change one role's assigned model. Body: {"role": "editor"|"reviewer"|
+    "orchestrator", "model": "<id from CODER_MODELS_ROSTER>"}. "editor"/
+    "reviewer" update snarf's model_role_assignments.json directly.
+    "orchestrator" instead updates Hermes's own live config on CT111 (see
+    _set_orchestrator_model) -- the real mechanism behind `hermes kanban
+    decompose`/`specify`, not a second file nothing reads. The response's
+    "live_roles" tells the caller which change actually takes effect
+    immediately vs. is just recorded for later (reviewer)."""
+    payload = await request.json()
+    role = (payload.get("role") or "").strip()
+    model = (payload.get("model") or "").strip()
+    if role not in MODEL_ROLE_NAMES:
+        return JSONResponse(
+            {"ok": False, "error": f"role must be one of {MODEL_ROLE_NAMES}"}, status_code=400
+        )
+    if model not in _CODER_ROSTER_BY_ID:
+        return JSONResponse({"ok": False, "error": f"unknown model id {model!r}"}, status_code=400)
+
+    if role == "orchestrator":
+        try:
+            await _set_orchestrator_model(model)
+        except Exception as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+        try:
+            rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(MODEL_ROLE_ASSIGNMENTS_PATH)}")
+            assignments = json.loads(out) if rc == 0 else {}
+        except Exception:
+            assignments = {}
+        assignments["orchestrator"] = model
+        return JSONResponse({"ok": True, "assignments": assignments, "live_roles": sorted(MODEL_ROLE_LIVE)})
+
+    try:
+        rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(MODEL_ROLE_ASSIGNMENTS_PATH)}")
+        if rc != 0:
+            raise RuntimeError(f"cat exited {rc}: {out[-500:]}")
+        assignments = json.loads(out)
+        assignments[role] = model
+        new_content = json.dumps(assignments, indent=2) + "\n"
+        write_cmd = f"printf %s {shlex.quote(new_content)} > {shlex.quote(MODEL_ROLE_ASSIGNMENTS_PATH)}"
+        rc2, out2 = await _fleet_ssh("snarf", write_cmd)
+        if rc2 != 0:
+            raise RuntimeError(f"write exited {rc2}: {out2[-500:]}")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    return JSONResponse({"ok": True, "assignments": assignments, "live_roles": sorted(MODEL_ROLE_LIVE)})
+
+
+CODER_ENGINE_VENV_PY = "/ssdpool/coder-engine/.venv/bin/python3"
+DISPATCH_REVIEW_TASK_PY = "/ssdpool/coder-engine/pipeline/dispatch_review_task.py"
+
+
+@app.post("/api/review-file")
+async def review_file(request: Request) -> JSONResponse:
+    """On-demand, human-triggered live review of one real DARKHELIX file --
+    the reviewer role's actual live path (per Sam's explicit direction:
+    "these steps are required even if they don't push a final choice" --
+    reviewer needs a real, invocable pipeline even though it never acts
+    unsupervised). Runs dispatch_review_task.py on snarf against whatever
+    model model_role_assignments.json currently has for "reviewer" (so
+    changing that dropdown changes what a review actually uses, same as
+    editor), then files the result as a --triage kanban card -- never a
+    higher status, same safety gate SUBMIT WORK already established above:
+    a human decides what happens next, this only proposes. One call = one
+    review, no schedule, no automatic trigger -- same "one dispatch = one
+    attempt" discipline as dispatch_task.py.
+
+    Body: {"target_file": "path/inside/DARKHELIX", "task_description":
+    optional override of the default review prompt}."""
+    payload = await request.json()
+    target_file = (payload.get("target_file") or "").strip()
+    if not target_file:
+        return JSONResponse({"ok": False, "error": "target_file is required"}, status_code=400)
+    task_description = (payload.get("task_description") or "").strip()
+
+    try:
+        rc0, out0 = await _fleet_ssh("snarf", f"cat {shlex.quote(MODEL_ROLE_ASSIGNMENTS_PATH)}")
+        model = json.loads(out0).get("reviewer") if rc0 == 0 else None
+    except Exception:
+        model = None
+    if not model:
+        return JSONResponse(
+            {"ok": False, "error": "could not resolve reviewer's assigned model"}, status_code=502
+        )
+
+    cmd = (
+        f"{CODER_ENGINE_VENV_PY} {DISPATCH_REVIEW_TASK_PY} "
+        f"--repo-path {shlex.quote(DARKHELIX_REPO_PATH)} "
+        f"--target-file {shlex.quote(target_file)} "
+        f"--model {shlex.quote(model)}"
+    )
+    if task_description:
+        cmd += f" --task-description {shlex.quote(task_description)}"
+
+    try:
+        rc, out = await _fleet_ssh("snarf", cmd)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+    brace = out.find("{")
+    try:
+        if brace < 0:
+            raise ValueError("no JSON object in output")
+        result = json.loads(out[brace:])
+    except (ValueError, json.JSONDecodeError):
+        return JSONResponse({"ok": False, "error": f"unparseable review output: {out[-1500:]}"}, status_code=502)
+
+    if result.get("status") != "done":
+        return JSONResponse(
+            {"ok": False, "error": result.get("error") or "review failed", "model": model},
+            status_code=502,
+        )
+
+    review_text = result.get("review_text") or ""
+    title = f"[Review] {target_file}"
+    body = (
+        f"Automated review by {model} (reviewer role) -- a proposal, not a "
+        f"verified finding. Read it and decide; nothing has been changed.\n\n"
+        f"{review_text}"
+    )
+    kanban_cmd = (
+        "hermes kanban create "
+        f"{shlex.quote(title[:200])} "
+        f"--body {shlex.quote(body)} "
+        "--workspace scratch --triage --created-by looking-glass --json"
+    )
+    try:
+        rc2, out2 = await _kanban_ssh(kanban_cmd)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc), "review_text": review_text}, status_code=502)
+    if rc2 != 0:
+        return JSONResponse({"ok": False, "error": out2[-2000:], "review_text": review_text}, status_code=502)
+    try:
+        task_data = json.loads(out2.strip())
+    except json.JSONDecodeError:
+        return JSONResponse(
+            {"ok": False, "error": f"unparseable kanban output: {out2[-500:]}", "review_text": review_text},
+            status_code=502,
+        )
+
+    return JSONResponse({"ok": True, "task": task_data, "model": model, "review_text": review_text})
 
 
 def _parse_checkbox_md(text: str) -> dict:
@@ -1651,6 +2128,189 @@ async def kanban_board() -> JSONResponse:
 
 
 _TASK_ID_RE = re.compile(r"^t_[0-9a-f]{6,}$")
+
+
+
+# ------------------------------------------------ SUBMIT WORK (DARKHELIX) --
+# Lets Sam turn a real DARKHELIX TODO.md item into a real kanban card in one
+# click, with optional freeform instructions appended. Added 2026-08-22.
+#
+# Reuses the exact same asyncssh-over-TERMINAL_HOSTS mechanism _kanban_ssh
+# already proved out for /api/kanban -- CT112 already holds a fleet-wide
+# terminal key, so this needed no new plumbing, just a second host (snarf,
+# to read TODO.md) and a write instead of a read (hermes kanban create).
+#
+# Deliberate safety choice, reviewed with Sam before building: every card
+# created here files to --triage, never straight to ready/running. Hermes's
+# own specifier still has to flesh out and decompose it before anything
+# executes -- single-click submission, not single-click unattended dispatch.
+#
+# No `hermes project` is registered for DARKHELIX yet (confirmed live,
+# `hermes project list` -> "No projects yet"), so this anchors the task
+# directly via --workspace worktree:<path> rather than --project.
+
+DARKHELIX_TODO_PATH = "/ssdpool/DARKHELIX/TODO.md"
+DARKHELIX_REPO_PATH = "/ssdpool/DARKHELIX"
+
+_TODO_ITEM_RE = re.compile(r"^- \[([ xX])\]\s*(.*)$")
+_TODO_HEADING_RE = re.compile(r"^#{1,3}\s+(.*)$")
+_TODO_STATUS_TAG_RE = re.compile(r"^\*\*(WIP|WAITING)\*\*\s*")
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+async def _fleet_ssh(host_key: str, cmd: str) -> tuple[int, str]:
+    """Same mechanism as _kanban_ssh, parameterized by host key -- lets
+    /api/darkhelix-todo reach snarf with the identical proven connection
+    pattern _kanban_ssh already uses to reach hermes."""
+    target = TERMINAL_HOSTS.get(host_key)
+    if not target:
+        raise RuntimeError(f"{host_key!r} is not a known terminal host")
+    async with asyncssh.connect(
+        target["host"], username=target["user"], client_keys=[TERMINAL_KEY_PATH],
+    ) as conn:
+        result = await conn.run(cmd, check=False)
+        return result.exit_status, (result.stdout or "") + (result.stderr or "")
+
+
+def _parse_darkhelix_todo(text: str) -> list[dict]:
+    """Parse DARKHELIX's TODO.md checkbox items into submittable work items.
+    Matches the file's own documented convention (see its own header):
+    only "- [ ]"/"- [x]" lines are real items; a **WAITING**/**WIP** tag
+    right after the checkbox is a status marker, not item text. Items
+    commonly run to a few hundred words -- joined until the next item,
+    heading, or blank line."""
+    items: list[dict] = []
+    section = None
+    current: dict | None = None
+
+    def flush():
+        nonlocal current
+        if current is not None:
+            items.append(current)
+            current = None
+
+    for line in text.splitlines():
+        h = _TODO_HEADING_RE.match(line)
+        if h:
+            flush()
+            section = h.group(1).strip()
+            continue
+        m = _TODO_ITEM_RE.match(line)
+        if m:
+            flush()
+            rest = m.group(2)
+            tag_m = _TODO_STATUS_TAG_RE.match(rest)
+            tag = tag_m.group(1) if tag_m else None
+            if tag_m:
+                rest = rest[tag_m.end():]
+            current = {
+                "section": section,
+                "done": m.group(1).strip().lower() == "x",
+                "status_tag": tag,
+                "text": rest.strip(),
+            }
+            continue
+        if current is not None:
+            if not line.strip():
+                flush()
+            else:
+                current["text"] += "\n" + line
+
+    flush()
+
+    result = []
+    for i, it in enumerate(items):
+        if it["done"]:
+            continue
+        cleaned = it["text"].strip()
+        if not cleaned:
+            continue
+        result.append({
+            "id": f"todo-{i}",
+            "section": it["section"],
+            "blocked": it["status_tag"] == "WAITING",
+            "wip": it["status_tag"] == "WIP",
+            "text": cleaned,
+            "title": cleaned.split("\n")[0][:140],
+        })
+    return result
+
+
+@app.get("/api/darkhelix-todo")
+async def darkhelix_todo() -> JSONResponse:
+    """Real, current TODO.md items from DARKHELIX (snarf), for the SUBMIT
+    WORK panel's picker. Read live every request, no caching -- Sam edits
+    this file directly and it's the single tracker ("if it isn't here, it
+    isn't tracked")."""
+    try:
+        rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(DARKHELIX_TODO_PATH)}")
+    except Exception as exc:
+        return JSONResponse({"items": [], "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"items": [], "error": f"cat exited {rc}"}, status_code=502)
+    return JSONResponse({"items": _parse_darkhelix_todo(out)})
+
+
+def _slugify(text: str, max_len: int = 40) -> str:
+    s = _SLUG_RE.sub("-", text.lower()).strip("-")
+    return (s[:max_len] or "task").strip("-")
+
+
+@app.post("/api/kanban/create")
+async def kanban_create(request: Request) -> JSONResponse:
+    """Single-click work submission: files a REAL kanban card, filed
+    --workspace scratch. Always files to --triage -- see the module note
+    above for why this is a deliberate, reviewed choice, not a default
+    left unconsidered.
+
+    NOTE on workspace kind: this used to pass
+    --workspace worktree:{DARKHELIX_REPO_PATH}, which tells Hermes to
+    validate/manage a real git worktree at that path itself, from CT111.
+    That's wrong -- DARKHELIX only exists on snarf, a different physical
+    host CT111 can't see into, so Hermes always reported "not a git repo"
+    the moment a worker actually tried to use the card (see
+    snazzy-chasing-willow.md's 2026-08-22 handoff for the live repro).
+    The execution-engine-dispatch skill is what actually manages the
+    worktree, by SSHing to snarf itself -- so the repo path + branch name
+    are embedded as plain text in the body instead, for the skill/agent
+    to read directly rather than something Hermes tries to validate.
+
+    Body: {"title": "...", "body": "..."} -- title is required (the
+    picked TODO item's own first line, or freeform); body carries the
+    item's full text plus any optional instructions appended."""
+    payload = await request.json()
+    title = (payload.get("title") or "").strip()
+    if not title:
+        return JSONResponse({"ok": False, "error": "title is required"}, status_code=400)
+    body = payload.get("body") or ""
+    branch = f"wt/{_slugify(title)}-{int(time.time())}"
+    dispatch_target = (
+        "[dispatch-target]\n"
+        f"repo: {DARKHELIX_REPO_PATH}\n"
+        f"branch: {branch}\n"
+        "[/dispatch-target]\n\n"
+    )
+    body = dispatch_target + body
+    cmd = (
+        "hermes kanban create "
+        f"{shlex.quote(title[:200])} "
+        f"--body {shlex.quote(body)} "
+        "--workspace scratch "
+        "--triage --created-by looking-glass --json"
+    )
+    try:
+        rc, out = await _kanban_ssh(cmd)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": out[-2000:]}, status_code=502)
+    try:
+        data = json.loads(out.strip())
+    except json.JSONDecodeError:
+        return JSONResponse(
+            {"ok": False, "error": f"unparseable output: {out[-500:]}"}, status_code=502
+        )
+    return JSONResponse({"ok": True, "task": data})
 
 
 @app.get("/api/kanban/{task_id}/log")

@@ -14,6 +14,24 @@ const KANBAN_STATUS_CLASS = {
   review:"warn", scheduled:"", triage:"warn", archived:"",
 };
 
+/* Task-log pane is blank until a card is actually dispatched — there is no
+   run log file for a card still sitting in --triage. That reads as "stuck"
+   with nothing else on screen, so the status header spells out what's
+   actually happening at each stage (mirrors kanban_create's own module note
+   in server.py: triage -> the specifier decomposes it -> dispatcher picks
+   it up -> only then does a real log start). */
+const KANBAN_STATUS_MSG = {
+  triage: "queued for triage — waiting on Hermes's specifier to decompose it",
+  todo: "specified — waiting for the dispatcher to pick it up",
+  ready: "ready — waiting for the dispatcher to pick it up",
+  scheduled: "scheduled — waiting for its window",
+  blocked: "blocked — needs attention",
+  running: "running — live log below",
+  review: "awaiting review",
+  done: "done",
+  archived: "archived",
+};
+
 function kanbanAge(task){
   const t = task.completed_at || task.started_at || task.created_at;
   if(!t) return "";
@@ -72,23 +90,41 @@ function openKanbanBoard(){
 
 /* A task's run log is the live transcript of Hermes working. Polled rather
    than streamed: the log is a file on another box, and a 3s poll is far
-   simpler than plumbing a second websocket for something read-only. */
+   simpler than plumbing a second websocket for something read-only.
+
+   The status header above the log is polled the same cadence, off the full
+   board list (there's no single-task status endpoint) — cheap and it's the
+   only way to show "queued for triage, waiting on the specifier" instead
+   of a blank pane before a log file exists. */
 function openTaskLog(taskId){
   openWorkTabTurning("tasklog",taskId,taskId,(panel,tab)=>{
-    panel.innerHTML = `<pre class="kb-log">loading…</pre>`;
+    panel.innerHTML = `<div class="kb-log-status">checking status…</div><pre class="kb-log">loading…</pre>`;
     panel.classList.add("tasklog-pane");
+    const statusEl = panel.querySelector(".kb-log-status");
     const pre = panel.querySelector(".kb-log");
     let stopped = false;
-    const pull = async () => {
+    const pullStatus = async () => {
+      try{
+        const r = await fetch("/api/kanban");
+        const j = await r.json();
+        const task = (j.tasks||[]).find(t => t.id === taskId);
+        if(!task){ statusEl.innerHTML = `<span class="err">card not found on board</span>`; return; }
+        const cls = KANBAN_STATUS_CLASS[task.status] ?? "";
+        const msg = KANBAN_STATUS_MSG[task.status] ?? task.status;
+        statusEl.innerHTML = `<b class="${cls}">${task.status}${task.status==="running"?" ●":""}</b> — ${msg}`;
+      }catch(err){ statusEl.innerHTML = `<span class="err">status unavailable: ${err.message}</span>`; }
+    };
+    const pullLog = async () => {
       if(stopped) return;
       try{
         const r = await fetch(`/api/kanban/${encodeURIComponent(taskId)}/log?lines=400`);
         const j = await r.json();
         const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
-        pre.textContent = j.log || j.error || "(no log yet — the task may not have started)";
+        pre.textContent = j.log || j.error || "(no run log yet — still in triage/queue; see status above)";
         if(atBottom) pre.scrollTop = pre.scrollHeight;
       }catch(err){ pre.textContent = "log unavailable: "+err.message; }
     };
+    const pull = () => { pullStatus(); pullLog(); };
     pull();
     const iv = setInterval(pull, 3000);
     tab.onBeforeClose = () => { stopped = true; clearInterval(iv); };

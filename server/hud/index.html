@@ -83,6 +83,8 @@
       <button class="btn viewBtn" id="netmapToggleBtn" data-action="netmap">▸ NETWORK MAP</button>
       <button class="btn viewBtn" data-action="flow" style="border-color:var(--orange); color:var(--orange)">◈ PROJECT FLOW</button>
       <button class="btn viewBtn" data-action="coder-models" style="border-color:var(--cyan); color:var(--cyan)" title="coder-engine Phase 3 eval roster: what each candidate model is for, and how it's performing">◇ CODER MODELS</button>
+      <button class="btn viewBtn" data-action="coder-transit-map" style="border-color:var(--magenta); color:var(--magenta)" title="Subway-map view of every role the coder-engine pipeline needs a model for: editor, reviewer, orchestrator">☷ TRANSIT MAP</button>
+      <button class="btn viewBtn" data-action="submit-work" style="border-color:var(--teal); color:var(--teal)" title="Submit a real DARKHELIX TODO.md item to Hermes as a kanban card (files to triage)">▸ SUBMIT WORK</button>
       <button class="btn viewBtn" data-action="pair" style="border-color:var(--magenta); color:var(--magenta)">◧ AGENT WORK + CLAUDE</button>
       <button class="btn viewBtn" data-action="hermes-live" title="The HUD's own chat thread — not where kanban work runs">▸ HUD CHAT THREAD</button>
       <button class="btn viewBtn" data-action="claude" data-host="snarf"
@@ -185,6 +187,8 @@
 <script src="kanban.js"></script>
 <script src="ownership.js"></script>
 <script src="coder-models.js"></script>
+<script src="coder-transit-map.js"></script>
+<script src="submit-work.js"></script>
 <script src="network-map.js"></script>
 </body>
 </html>
