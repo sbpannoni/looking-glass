@@ -2100,15 +2100,56 @@ def _kanban_cfg() -> dict:
     return CFG.get("kanban") or {"host": "hermes"}
 
 
-async def _kanban_ssh(cmd: str) -> tuple[int, str]:
-    target = TERMINAL_HOSTS.get(_kanban_cfg().get("host", "hermes"))
+# --- pooled SSH -----------------------------------------------------------
+# Every API request used to open a fresh asyncssh connection, run one command
+# and tear it down. With the HUD polling continuously that produced ~110k sshd
+# lines/day on hermes (582MB journal, plus matching systemd-logind churn).
+# Connections are now cached per host and reused; a dropped/stale connection is
+# discarded and retried once, so behaviour on failure is unchanged.
+_SSH_CONNS: dict = {}
+_SSH_LOCKS: dict = {}
+
+
+async def _ssh_connection(host_key: str):
+    target = TERMINAL_HOSTS.get(host_key)
     if not target:
-        raise RuntimeError("kanban host is not a known terminal host")
-    async with asyncssh.connect(
-        target["host"], username=target["user"], client_keys=[TERMINAL_KEY_PATH],
-    ) as conn:
-        result = await conn.run(cmd, check=False)
-        return result.exit_status, (result.stdout or "") + (result.stderr or "")
+        raise RuntimeError(f"{host_key!r} is not a known terminal host")
+    lock = _SSH_LOCKS.get(host_key)
+    if lock is None:
+        lock = _SSH_LOCKS[host_key] = asyncio.Lock()
+    async with lock:
+        conn = _SSH_CONNS.get(host_key)
+        if conn is not None:
+            return conn
+        conn = await asyncssh.connect(
+            target["host"], username=target["user"],
+            client_keys=[TERMINAL_KEY_PATH],
+            keepalive_interval=30, keepalive_count_max=3,
+        )
+        _SSH_CONNS[host_key] = conn
+        return conn
+
+
+async def _ssh_run(host_key: str, cmd: str) -> tuple[int, str]:
+    last_exc = None
+    for _attempt in (1, 2):
+        try:
+            conn = await _ssh_connection(host_key)
+            result = await conn.run(cmd, check=False)
+            return result.exit_status, (result.stdout or "") + (result.stderr or "")
+        except Exception as exc:
+            last_exc = exc
+            stale = _SSH_CONNS.pop(host_key, None)
+            if stale is not None:
+                try:
+                    stale.abort()
+                except Exception:
+                    pass
+    raise last_exc
+
+
+async def _kanban_ssh(cmd: str) -> tuple[int, str]:
+    return await _ssh_run(_kanban_cfg().get("host", "hermes"), cmd)
 
 
 @app.get("/api/kanban")
@@ -2201,14 +2242,7 @@ async def _fleet_ssh(host_key: str, cmd: str) -> tuple[int, str]:
     """Same mechanism as _kanban_ssh, parameterized by host key -- lets
     /api/darkhelix-todo reach snarf with the identical proven connection
     pattern _kanban_ssh already uses to reach hermes."""
-    target = TERMINAL_HOSTS.get(host_key)
-    if not target:
-        raise RuntimeError(f"{host_key!r} is not a known terminal host")
-    async with asyncssh.connect(
-        target["host"], username=target["user"], client_keys=[TERMINAL_KEY_PATH],
-    ) as conn:
-        result = await conn.run(cmd, check=False)
-        return result.exit_status, (result.stdout or "") + (result.stderr or "")
+    return await _ssh_run(host_key, cmd)
 
 
 def _parse_darkhelix_todo(text: str) -> list[dict]:
@@ -3022,15 +3056,13 @@ def _systemctl(svc: dict, verb: str) -> str:
 async def _service_ssh_exec(svc: dict, cmd: str) -> tuple[int, str]:
     """One-shot SSH command against a service's host — same key/user as the
     terminal panel (TERMINAL_HOSTS), a single command instead of a shell."""
-    target = TERMINAL_HOSTS.get(svc.get("host", ""))
-    if not target:
+    host_key = svc.get("host", "")
+    if host_key not in TERMINAL_HOSTS:
         raise RuntimeError(f"service host {svc.get('host')!r} is not a known terminal host")
-    async with asyncssh.connect(
-        target["host"], username=target["user"], client_keys=[TERMINAL_KEY_PATH],
-    ) as conn:
-        result = await conn.run(cmd, check=False)
-        output = ((result.stdout or "") + (result.stderr or "")).strip()
-        return result.exit_status, output
+    # pooled: the service panel polls every host's units on a timer, so a
+    # connection per status check was the bulk of the sshd volume on hermes.
+    rc, output = await _ssh_run(host_key, cmd)
+    return rc, output.strip()
 
 
 async def _service_state(svc: dict) -> str:
@@ -3085,6 +3117,15 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     try:
         while True:
             message = await ws.receive()
+            if message.get("type") == "websocket.disconnect":
+                # Raw ws.receive() RETURNS this dict rather than raising
+                # WebSocketDisconnect (only receive_text/json/bytes raise).
+                # Without this the loop falls through both branches, calls
+                # receive() again on a closed socket, and starlette raises
+                # RuntimeError -> "Exception in ASGI application" on every
+                # client disconnect. Re-raise so the existing handler below
+                # still cancels an in-flight turn_task.
+                raise WebSocketDisconnect(message.get("code", 1005))
             if "text" in message and message["text"] is not None:
                 event = json.loads(message["text"])
                 etype = event.get("type")
