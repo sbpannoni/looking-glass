@@ -227,9 +227,16 @@ function transitOrchestratorCard(m){
 }
 
 function transitRoleOptions(roster, selected){
-  return (roster || []).map(m =>
-    `<option value="${m.id}"${m.id === selected ? " selected" : ""}>${m.label}</option>`
-  ).join("");
+  // A model with tool_calling === false (from CODER_MODELS_ROSTER via
+  // /api/model-role-assignments) can't emit structured tool calls, so it can't
+  // fill any role -- render it disabled with a visible reason. The server
+  // rejects it too (POST guard), since this endpoint is callable directly.
+  return (roster || []).map(m => {
+    const noTools = m.tool_calling === false;
+    const label = noTools ? `${m.label} — no tool calls (can't be assigned)` : m.label;
+    return `<option value="${m.id}"${m.id === selected ? " selected" : ""}`
+      + `${noTools ? " disabled" : ""}>${label}</option>`;
+  }).join("");
 }
 
 // Dropdown bar surfacing the model actually configured per role and

@@ -1407,6 +1407,7 @@ CODER_TRANSIT_ORCHESTRATOR = {
 CODER_MODELS_ROSTER = [
     {
         "id": "qwen3.6-27b-awq", "label": "Qwen3.6 27B", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "27B dense, hybrid linear/full attention, 98K ctx (served)",
         "status": "resident default",
         "good_for": "Current pipeline default. Cited by multiple community sources as "
@@ -1415,6 +1416,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "qwen2.5-32b-awq", "label": "Qwen2.5 32B", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "32B dense, 32K ctx",
         "status": "resident (rotation)",
         "good_for": "General-purpose, not code-specialized. Baseline the code-tuned "
@@ -1423,6 +1425,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "llama3.1-70b-awq", "label": "Llama 3.1 70B", "license": "Llama 3.1 Community",
+        "tool_calling": True,
         "params": "70B dense, TP=2 required",
         "status": "resident (rotation)",
         "good_for": "Largest resident model. General-purpose, not code-tuned. Tests "
@@ -1431,6 +1434,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "qwen3-14b-awq", "label": "Qwen3 14B", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "14.8B dense, TP=1, 40K ctx",
         "status": "resident (rotation)",
         "good_for": "Smallest resident model — fits one GPU, fastest cold-swap. Speed/"
@@ -1438,6 +1442,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "devstral-small-2-24b-awq", "label": "Devstral Small 2 24B", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "24B dense",
         "status": "tested 2026-08-21 — 0.625 pass rate, CONFIRMED STABLE (best)",
         "good_for": "Purpose-built for agentic coding by Mistral + All Hands AI — "
@@ -1451,6 +1456,10 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "deepseek-r1-distill-qwen-32b-awq", "label": "DeepSeek-R1-Distill-Qwen 32B", "license": "MIT",
+        # Emits ```json blocks; no registered vLLM parser matches (deepseek_v3
+        # expects <|tool_call_begin|>), so tool calls arrive as prose. Cannot be
+        # assigned to a role. Verified on snarf 2026-08-26.
+        "tool_calling": False,
         "params": "32B dense, reasoning-distilled from DeepSeek-R1",
         "status": "tested 2026-08-21 — 0.583 pass rate across repeats, NOT stable, ~2.2x slower",
         "good_for": "Reasoning-distilled onto a Qwen2.5-32B base. Tests whether "
@@ -1467,6 +1476,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "qwen3-coder-30b-a3b-awq", "label": "Qwen3-Coder 30B-A3B", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "30.5B total / 3.3B active MoE (128 experts, 8 routed)",
         "status": "tested 2026-08-21 — 0.5 pass rate, CONFIRMED STABLE, fast (avg 45s)",
         "good_for": "Coder-tuned MoE sibling of the resident default — fast inference "
@@ -1476,6 +1486,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "qwen2.5-coder-32b-instruct-awq", "label": "Qwen2.5-Coder 32B", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "32B dense",
         "status": "tested 2026-08-21 — 0.5 pass rate, 1 disagreement (self-reported done, code was actually broken)",
         "good_for": "Official Qwen-org AWQ quant of the dedicated code model in the "
@@ -1484,6 +1495,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "kimi-linear-48b-a3b-awq", "label": "Kimi-Linear 48B-A3B", "license": "MIT",
+        "tool_calling": True,
         "params": "48B total / 3B active MoE, novel linear attention (KDA), 1M ctx",
         "status": "incompatible — hardware ceiling, not a config issue",
         "good_for": "Genuinely bleeding-edge: Moonshot AI's Kimi Delta Attention "
@@ -1498,6 +1510,10 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "codestral-22b-awq", "label": "Codestral 22B", "license": "Mistral AI Non-Production (MNPL) — research/internal use only",
+        # Ships no chat_template.jinja; its tokenizer_config template ignores
+        # `tools`, so the model never sees tool definitions and can't emit tool
+        # calls. Cannot be assigned to a role. Verified on snarf 2026-08-26.
+        "tool_calling": False,
         "params": "22B dense, code-specialized, 32K ctx",
         "status": "tested 2026-08-21 — 0.25 pass rate (worst), 3/8 hard timeouts",
         "good_for": "Mistral's dedicated code model, same family as the resident "
@@ -1516,6 +1532,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "gemma-4-31b-it-awq", "label": "Gemma 4 31B", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "30.7B dense, multimodal (vision+video), 256K ctx",
         "status": "incompatible — hardware ceiling, not a config issue",
         "good_for": "Google DeepMind's latest open dense model, ranked #3 on the Arena "
@@ -1534,6 +1551,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "qwen3.8-27b-abliterated-awq", "label": "Qwen3.8 27B (abliterated AWQ)", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "27.8B dense, hybrid Gated DeltaNet + Gated Attention, AWQ W4A16, MTP preserved",
         "status": "tested 2026-08-22 -- comparable to the INT8 quant, faster, no boot flakiness",
         "good_for": "Same base model as qwen3.8-27b-int8-w8a16, different community quant "
@@ -1553,6 +1571,7 @@ CODER_MODELS_ROSTER = [
     },
     {
         "id": "qwen3.8-27b-int8-w8a16", "label": "Qwen3.8 27B (INT8)", "license": "Apache 2.0",
+        "tool_calling": True,
         "params": "27.78B dense, hybrid Gated DeltaNet + Gated Attention, 262K ctx (1M w/ YaRN)",
         "status": "tested 2026-08-21 — 0.375 pass rate, slow (avg 209s), boot-flaky",
         "good_for": "Newer generation of the resident default's own architecture "
@@ -1857,7 +1876,10 @@ async def model_role_assignments() -> JSONResponse:
     return JSONResponse({
         "assignments": assignments,
         "live_roles": sorted(MODEL_ROLE_LIVE),
-        "roster": [{"id": e["id"], "label": e["label"]} for e in CODER_MODELS_ROSTER],
+        "roster": [
+            {"id": e["id"], "label": e["label"], "tool_calling": e.get("tool_calling", True)}
+            for e in CODER_MODELS_ROSTER
+        ],
     })
 
 
@@ -1880,6 +1902,15 @@ async def set_model_role_assignment(request: Request) -> JSONResponse:
         )
     if model not in _CODER_ROSTER_BY_ID:
         return JSONResponse({"ok": False, "error": f"unknown model id {model!r}"}, status_code=400)
+    # A model that can't emit structured tool calls produces prose instead of
+    # executable tool calls in any role -- the run looks like a refusal. Reject
+    # here, not just in the UI, since this endpoint is callable directly.
+    if not _CODER_ROSTER_BY_ID[model].get("tool_calling", True):
+        return JSONResponse(
+            {"ok": False, "error": f"model {model!r} cannot emit structured tool calls "
+                                   f"and cannot be assigned to a role"},
+            status_code=400,
+        )
 
     if role == "orchestrator":
         try:
