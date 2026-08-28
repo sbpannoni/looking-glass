@@ -58,28 +58,58 @@ async function refreshMachines(){
     const r=await fetch("/api/machines"); const j=await r.json();
     const rows=(j.machines||[]);
     if(!rows.length){ $("machinesList").innerHTML="<div class='kv'><span>probing…</span></div>"; return; }
-    $("machinesList").innerHTML=rows.map(m=>{
-      const bits=[];
-      if(m.cpu!=null)bits.push(`CPU ${Math.round(m.cpu)}%`);
-      if(m.load1!=null)bits.push(`load ${m.load1}`);
-      if(m.mem!=null)bits.push(`MEM ${Math.round(m.mem)}%`);
-      if(m.gpu_util!=null)bits.push(`GPU ${Math.round(m.gpu_util)}%`);
-      if(m.vram_used!=null&&m.vram_total!=null)bits.push(`VRAM ${m.vram_used}/${m.vram_total}G`);
-      if(m.gpu_temp!=null)bits.push(`${m.gpu_temp}°`);
-      if(!bits.length&&m.note)bits.push(m.note);
-      // kind is the useful disambiguator here — three of these rows are LXCs on
-      // one mini-PC, and two are BMCs that stay up when their host is dark.
-      const kind=m.kind?`<span class="mach-kind">${m.kind}</span>`:"";
-      // depth 1 = a guest on the row above it (the LXCs sharing beelink's
-      // hardware). Indenting makes the blast radius obvious: beelink going down
-      // takes the three rows beneath it with it.
+    // Fixed COLUMNS, not a "·"-joined string. Free-form joins meant MEM
+    // landed at a different x on every row, so comparing two machines meant
+    // reading rather than glancing -- which is the whole job of this panel.
+    // Only the metrics every host can have get a column; gpu temp / util /
+    // vram are per-machine extras and live in the tooltip.
+    const cell=(v,suffix)=>v==null?'<span class="mach-c mach-nil">·</span>'
+                                  :`<span class="mach-c">${v}${suffix||""}</span>`;
+    const head='<div class="mach-hdr"><span></span>'+
+               ['CPU','LOAD','MEM','SWP','DSK'].map(h=>`<span>${h}</span>`).join("")+'</div>';
+    $("machinesList").innerHTML=head+rows.map(m=>{
+      // No kind chip on the line any more: with five fixed metric columns the
+      // name cell cannot hold it, and it was truncating to "gpu-wc" / "s".
+      // kind is in the tooltip; the indent already shows which rows are guests.
       const child=m.depth?" mach-child":"";
       // A node we deliberately don't probe is neither green nor red — a red dot
       // there is a false alarm that trains you to ignore red dots.
       const dot=m.monitored===false?"na":(m.online?"on":"off");
-      return `<div class="kv mach-row${child}${m.monitored===false?" mach-na":""}" title="${m.address||""}">`+
-             `<span><span class="dot ${dot}"></span>${m.name}${kind}</span>`+
-             `<b>${bits.join(" · ")||(m.online?"online":"offline")}</b></div>`;
+      const upS=m.uptime_s;
+      const upTxt=upS==null?null:(upS>=86400?`${Math.floor(upS/86400)}d${Math.floor((upS%86400)/3600)}h`
+                                            :`${Math.floor(upS/3600)}h`);
+      const tip=[m.address, m.kind,
+                 m.gpu_temp!=null?`gpu ${m.gpu_temp}°C`:null,
+                 m.gpu_util!=null?`gpu ${Math.round(m.gpu_util)}%`:null,
+                 (m.vram_used!=null&&m.vram_total!=null)?`vram ${m.vram_used}/${m.vram_total}G`:null,
+                 upTxt?`up ${upTxt}`:null,
+                 m.mem_source==="guest-allocated"?"mem = pages touched, not pressure":null
+                ].filter(Boolean).join(" · ");
+      const name=`<span class="mach-name"><span class="dot ${dot}"></span>${m.name}</span>`;
+      // Offline, unmonitored, or simply metric-less (a BMC answers but reports
+      // none of these) — nothing to align, so the note spans the columns. Five
+      // mid-dots in a row is noise, not information.
+      const hasMetrics = ["cpu","load1","mem","swap","disk"].some(k=>m[k]!=null);
+      if(!m.online || m.monitored===false || !hasMetrics){
+        const note=m.note||(m.online?"online":"offline");
+        return `<div class="mach-row${child}${m.monitored===false?" mach-na":""}" title="${tip}">`+
+               name+`<span class="mach-note">${note}</span></div>`;
+      }
+      // Only node_exporter memory means pressure. A QEMU guest's figure is
+      // pages-touched, which page cache pins near 100% indefinitely --
+      // red-flagging that is a false alarm, and false reds are how you learn
+      // to ignore real ones.
+      const memReal = m.mem_source!=="guest-allocated";
+      const memCls = (memReal && m.mem!=null && m.mem>=90) ? " err" : "";
+      const dskCls = (m.disk!=null && m.disk>=85) ? " err" : "";
+      const swpCls = (m.swap!=null && m.swap>=50) ? " warn" : "";
+      return `<div class="mach-row${child}" title="${tip}">`+name+
+        cell(m.cpu==null?null:Math.round(m.cpu),"%")+
+        cell(m.load1==null?null:m.load1.toFixed(2),"")+
+        `<span class="mach-c${memCls}">${m.mem==null?"·":Math.round(m.mem)+"%"}</span>`+
+        `<span class="mach-c${swpCls}">${m.swap==null?"·":Math.round(m.swap)+"%"}</span>`+
+        `<span class="mach-c${dskCls}">${m.disk==null?"·":Math.round(m.disk)+"%"}</span>`+
+        `</div>`;
     }).join("");
   }catch{ $("machinesList").innerHTML="<div class='kv'><span>unavailable</span></div>"; }
 }

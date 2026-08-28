@@ -495,23 +495,125 @@ footer{
    class, display only on the .active combination. */
 .kanban-pane{overflow:hidden; min-height:0}
 .work-panel.active.kanban-pane{display:flex; flex-direction:column}
-.kb-head{font-family:'Orbitron'; font-size:9px; letter-spacing:2px; color:var(--txt-dim); padding:2px 2px 8px}
-.kb-list{flex:1 1 auto; min-height:0; overflow-y:auto; display:grid; gap:6px; align-content:start}
-.kb-card{
-  border:1px solid var(--line); border-radius:8px; padding:8px 10px; cursor:pointer;
-  background:color-mix(in srgb, var(--panel) 70%, transparent); transition:border-color .15s ease;
+/* ---- board toolbar ---- */
+.kb-head{
+  display:flex; align-items:center; gap:10px; flex:0 0 auto;
+  font-family:'Orbitron'; font-size:9px; letter-spacing:2px; color:var(--txt-dim);
+  padding:2px 4px 8px;
 }
-.kb-card:hover{border-color:var(--cyan)}
-.kb-card.live{border-color:var(--amber); box-shadow:0 0 12px -4px var(--amber)}
-.kb-card.archived{opacity:.4}
-.kb-card.archived:hover{opacity:.7}
-.kb-row{display:flex; justify-content:space-between; font-size:11px}
-.kb-row b{font-family:'Orbitron'; font-size:9px; letter-spacing:1px}
-.kb-age{color:var(--txt-dim); font-size:10px}
-.kb-title{font-size:13px; margin:3px 0 2px}
-.kb-meta{font-size:10px; color:var(--txt-dim)}
-.kb-archive-btn{margin-top:6px; font-size:10px; padding:4px 9px}
-.kb-archive-btn:disabled{opacity:.5; cursor:default}
+.kb-head-title{color:var(--amber)}
+.kb-head-sub{font-family:'Rajdhani'; font-size:11px; letter-spacing:0}
+.kb-head-spacer{flex:1 1 auto}
+.kb-filter{
+  display:flex; align-items:center; gap:5px; font-family:'Rajdhani';
+  font-size:11px; letter-spacing:0; color:var(--txt-dim);
+}
+.kb-assignee{
+  background:var(--bg); color:var(--txt); border:1px solid var(--line); border-radius:6px;
+  font-family:'Rajdhani'; font-size:11px; padding:3px 6px; cursor:pointer; outline:none;
+}
+.kb-assignee:focus-visible{border-color:var(--cyan); box-shadow:0 0 0 2px #00e5ff33}
+.kb-source{font-family:'Rajdhani'; font-size:11px; letter-spacing:0; white-space:nowrap}
+.kb-board-err{padding:10px}
+
+/* ---- lanes ----
+   Horizontal strip of status columns. The lane row is the only thing that
+   scrolls sideways; each lane scrolls its own cards vertically. Empty lanes
+   collapse to a rail (see .rail) so the occupied ones keep the width — with
+   five of eight statuses typically empty, that is what makes the board fit
+   in the pane at all. */
+.kb-lanes{
+  flex:1 1 auto; min-height:0; display:flex; gap:8px; align-items:stretch;
+  overflow-x:auto; overflow-y:hidden; padding-bottom:4px;
+  scrollbar-width:thin; scrollbar-color:var(--line) transparent;
+}
+.kb-lane{
+  --lane:var(--txt-dim);
+  /* Grow into the width the collapsed rails give back, but stop before a
+     lone occupied lane stretches to the full pane. */
+  flex:1 1 268px; min-width:220px; max-width:420px; display:flex; flex-direction:column;
+  border:1px solid var(--line); border-top:2px solid var(--lane); border-radius:8px;
+  background:color-mix(in srgb, var(--panel) 55%, transparent);
+  transition:flex-basis .2s ease;
+}
+/* Status is the lane, so colour lives here once rather than on every card. */
+.kb-lane[data-status="ready"]{--lane:var(--cyan)}
+.kb-lane[data-status="running"]{--lane:var(--amber)}
+.kb-lane[data-status="blocked"]{--lane:var(--red)}
+.kb-lane[data-status="review"]{--lane:var(--magenta)}
+.kb-lane[data-status="done"]{--lane:var(--teal)}
+.kb-lane[data-status="scheduled"]{--lane:var(--cyan-dim)}
+
+.kb-lane-head{
+  flex:0 0 auto; display:flex; align-items:center; justify-content:space-between; gap:6px;
+  padding:7px 9px; cursor:pointer; user-select:none;
+  border-bottom:1px solid var(--line);
+}
+.kb-lane-head:hover{background:color-mix(in srgb, var(--lane) 12%, transparent)}
+.kb-lane-name{
+  font-family:'Orbitron'; font-size:9px; letter-spacing:2px; text-transform:uppercase;
+  color:var(--lane); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.kb-lane-count{
+  font-size:11px; color:var(--txt-dim); font-variant-numeric:tabular-nums;
+  border:1px solid var(--line); border-radius:9px; padding:0 6px; min-width:20px; text-align:center;
+}
+.kb-lane-list{
+  flex:1 1 auto; min-height:0; overflow-y:auto; padding:7px;
+  display:flex; flex-direction:column; gap:6px;
+  scrollbar-width:thin; scrollbar-color:var(--line) transparent;
+}
+
+/* Collapsed to a rail: the header turns on its side and the cards are gone,
+   so an empty status costs ~30px instead of a full lane's width. */
+.kb-lane.rail{flex:0 0 30px; min-width:0}
+.kb-lane.rail .kb-lane-list{display:none}
+.kb-lane.rail .kb-lane-head{
+  flex:1 1 auto; flex-direction:column; justify-content:flex-start; gap:8px;
+  border-bottom:none; padding:8px 2px;
+}
+.kb-lane.rail .kb-lane-name{writing-mode:vertical-rl; letter-spacing:3px}
+.kb-lane.rail .kb-lane-count{padding:0 3px; min-width:0; font-size:10px}
+
+/* ---- cards ----
+   No status word: the lane says it. What's left is the title and who owns
+   it, so a card is ~3 lines instead of the ~109px the old list card used. */
+.kb-card{
+  border:1px solid var(--line); border-left:2px solid var(--lane); border-radius:6px;
+  padding:7px 9px; cursor:pointer;
+  background:color-mix(in srgb, var(--panel) 80%, transparent);
+  transition:border-color .15s ease, background .15s ease;
+}
+.kb-card:hover{border-color:var(--cyan); background:color-mix(in srgb, var(--panel) 95%, transparent)}
+.kb-card.live{box-shadow:0 0 12px -4px var(--amber)}
+/* A card running far past any plausible runtime is not "live", and glowing
+   like a healthy run is exactly what let one sit unnoticed for five days.
+   The amber glow drops away and the left rail goes red so the stuck one is
+   the card that catches your eye in the running lane, not the busiest one. */
+.kb-card.live.stuck{box-shadow:none; border-left-color:var(--red)}
+.kb-card.archived{opacity:.45}
+.kb-card.archived:hover{opacity:.8}
+.kb-title{
+  font-size:13px; line-height:1.3; margin-bottom:5px;
+  display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden;
+}
+.kb-note{
+  font-size:10.5px; line-height:1.35; color:var(--red); margin-bottom:5px;
+  overflow-wrap:anywhere;
+}
+.kb-meta{display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:10px; color:var(--txt-dim)}
+.kb-who{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.kb-meta-r{display:flex; align-items:center; gap:5px; flex-shrink:0}
+.kb-chip{border:1px solid var(--line); border-radius:8px; padding:0 5px; font-size:9.5px}
+.kb-age{color:var(--txt-dim); font-size:10px; font-variant-numeric:tabular-nums}
+/* `button.btn` is element+class, so a single-class rule here loses the
+   cascade and the card buttons kept their full-size padding — which is why
+   Archive used to be the biggest thing on a card. Match the specificity. */
+button.btn.kb-card-btn{
+  margin-top:7px; font-size:9px; padding:3px 8px; letter-spacing:1px;
+  align-self:flex-start; display:block;
+}
+button.btn.kb-card-btn:disabled{opacity:.5; cursor:default}
 .tasklog-pane{overflow:hidden; min-height:0}
 .work-panel.active.tasklog-pane{display:flex; flex-direction:column}
 .kb-log{
@@ -525,6 +627,46 @@ footer{
   background:color-mix(in srgb, var(--panel) 70%, transparent);
 }
 .kb-log-status b{font-family:'Orbitron'; font-size:9px; letter-spacing:1px}
+/* Inline in the status line, so it reads as part of "this is what the card is
+   doing" rather than as another control bar. */
+button.btn.kb-log-reclaim{
+  font-size:9px; padding:2px 7px; letter-spacing:1px; margin-left:8px;
+  vertical-align:middle;
+}
+button.btn.kb-log-reclaim:disabled{opacity:.5; cursor:default}
+
+/* ---- verify-on-snarf control (task log pane) ---- */
+.kb-verify{
+  flex:0 0 auto; display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:6px 10px; margin-bottom:6px;
+  border:1px solid var(--line); border-left:2px solid var(--teal); border-radius:6px;
+  background:color-mix(in srgb, var(--panel) 70%, transparent);
+}
+.kb-verify-label{font-family:'Orbitron'; font-size:8.5px; letter-spacing:2px; color:var(--teal)}
+.kb-verify-check{
+  background:var(--bg); color:var(--txt); border:1px solid var(--line); border-radius:5px;
+  font-family:'Rajdhani'; font-size:12px; padding:3px 6px; cursor:pointer; outline:none;
+}
+.kb-verify-check:focus-visible{border-color:var(--cyan); box-shadow:0 0 0 2px #00e5ff33}
+/* `button.btn` is element+class and would otherwise win on padding. */
+button.btn.kb-verify-btn{padding:4px 11px; font-size:9px; letter-spacing:1px}
+button.btn.kb-verify-btn:disabled{opacity:.45; cursor:default}
+button.btn.kb-land-btn{padding:4px 11px; font-size:9px; letter-spacing:1px;
+  color:var(--teal); border-color:var(--teal); background:#06231a}
+button.btn.kb-land-btn:hover{box-shadow:0 0 10px #4ade8044}
+button.btn.kb-land-btn:disabled{opacity:.45; cursor:default}
+.kb-verify-status a{color:var(--cyan)}
+.kb-verify-file{
+  display:flex; align-items:center; gap:4px; font-size:11px; color:var(--txt-dim);
+  cursor:pointer; user-select:none;
+}
+.kb-verify-status{font-size:11.5px; margin-left:auto}
+.kb-verify-out{
+  flex:0 0 auto; max-height:34%; overflow:auto; margin:0 0 6px; padding:8px 10px;
+  white-space:pre-wrap; word-break:break-word; border-radius:6px;
+  font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; line-height:1.35;
+  color:#cfe3ee; background:#04070d; border:1px solid var(--line);
+}
 
 /* ---- backend service control rows ---- */
 .svc-row{padding:4px 0}
@@ -711,51 +853,223 @@ button.tm-review-btn:disabled{opacity:.5; cursor:default; box-shadow:none}
 .tm-review-status.err{color:var(--red)}
 
 /* ---------------- submit work (darkhelix todo) ---------------- */
-.sw-body{display:flex; flex-direction:column; gap:0; min-height:0; flex:1 1 auto; overflow-y:auto}
+/* ---- SUBMIT WORK ----
+   Two panes, one scroller each. Every height here is derived from the pane,
+   never from the viewport: the old rules used max-height:34vh / 16vh on flex
+   children of a scrolling flex column, and since flex-shrink defaults to 1
+   with no min-height, they were compressed to a fraction of the size they
+   asked for -- the picker to ~142px, the selected-item box to one clipped
+   line. flex + min-height:0 is what actually reserves space in a flex
+   column. */
+.sw-pane{overflow:hidden; min-height:0}
+.work-panel.active.sw-pane{display:flex; flex-direction:column}
+
+.sw-head{
+  display:flex; align-items:center; gap:10px; flex:0 0 auto;
+  font-family:'Orbitron'; font-size:9px; letter-spacing:2px; color:var(--txt-dim);
+  padding:2px 4px 8px;
+}
+.sw-head-title{color:var(--teal)}
+.sw-head-sub{font-family:'Rajdhani'; font-size:11px; letter-spacing:0}
+.sw-head-spacer{flex:1 1 auto}
+.sw-head button{
+  background:none; border:1px solid var(--line); border-radius:6px; color:var(--txt-dim);
+  font-family:'Rajdhani'; font-size:11px; letter-spacing:0; padding:3px 9px; cursor:pointer;
+}
+.sw-head button:hover{border-color:var(--cyan); color:var(--cyan)}
+.sw-head button.on{border-color:var(--teal); color:var(--teal)}
+
+.sw-body{flex:1 1 auto; min-height:0; display:flex; gap:8px; align-items:stretch}
+.sw-col{
+  display:flex; flex-direction:column; min-width:0; min-height:0;
+  border:1px solid var(--line); border-radius:8px;
+  background:color-mix(in srgb, var(--panel) 55%, transparent);
+}
+.sw-col-list{flex:1 1 44%}
+.sw-col-form{flex:1 1 56%}
+
+/* ---- picker ---- */
 .sw-filter{
-  margin:10px; padding:9px 11px; font-family:'Rajdhani'; font-size:15px;
-  background:#0a1420; color:var(--txt); border:1px solid var(--line); outline:none;
+  flex:0 0 auto; margin:7px; background:var(--bg); border:1px solid var(--line);
+  border-radius:6px; color:var(--txt); font-family:'Rajdhani'; font-size:13px;
+  padding:6px 9px; outline:none;
 }
 .sw-filter:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
-.sw-list{max-height:34vh; overflow-y:auto; padding:0 10px 6px; display:flex; flex-direction:column; gap:4px}
-.sw-row{
-  border:1px solid var(--line); border-left:2px solid var(--cyan); background:#050d16cc;
-  padding:7px 10px; cursor:pointer; transition:border-color .15s, background .15s;
+.sw-list{
+  flex:1 1 auto; min-height:0; overflow-y:auto; padding:0 7px 7px;
+  scrollbar-width:thin; scrollbar-color:var(--line) transparent;
 }
-.sw-row:hover{border-color:var(--cyan)}
-.sw-row-selected{background:#0a2435; border-left-color:var(--teal); border-color:var(--teal)}
-.sw-row-blocked{opacity:.4; cursor:not-allowed; border-left-color:var(--txt-dim)}
-.sw-row-section{font-family:'Orbitron'; font-size:9.5px; letter-spacing:1px; color:var(--txt-dim); text-transform:uppercase}
-.sw-row-title{font-size:14px; color:var(--txt); margin-top:3px}
-.sw-row-title .badge{margin-left:6px}
-.sw-selected{padding:9px 13px; font-size:14px; color:var(--txt-dim); max-height:16vh; overflow-y:auto}
-.sw-selected-text{white-space:normal; line-height:1.5}
+.sw-empty{padding:10px 4px; font-size:13px; color:var(--txt-dim)}
+
+/* Sections read like lane headers: a name, a count, click to collapse. The
+   name appears once here instead of on every row. */
+.sw-section{margin-bottom:8px}
+.sw-section-head{
+  position:sticky; top:0; z-index:1; display:flex; align-items:center;
+  justify-content:space-between; gap:8px; cursor:pointer; user-select:none;
+  padding:5px 6px; border-bottom:1px solid var(--line);
+  background:var(--panel);
+}
+.sw-section-head:hover{background:color-mix(in srgb, var(--cyan) 10%, var(--panel))}
+.sw-section-name{
+  font-family:'Orbitron'; font-size:8.5px; letter-spacing:1.5px; text-transform:uppercase;
+  color:var(--cyan-dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.sw-section-count{
+  font-size:10.5px; color:var(--txt-dim); font-variant-numeric:tabular-nums;
+  border:1px solid var(--line); border-radius:9px; padding:0 6px; flex-shrink:0;
+}
+.sw-section.collapsed .sw-section-rows{display:none}
+.sw-section-rows{display:flex; flex-direction:column; gap:3px; padding-top:5px}
+
+.sw-row{
+  display:flex; align-items:baseline; gap:6px; cursor:pointer;
+  border:1px solid transparent; border-left:2px solid var(--line);
+  border-radius:4px; padding:5px 8px;
+}
+.sw-row:hover{border-color:var(--cyan); border-left-color:var(--cyan)}
+.sw-row-title{
+  font-size:13px; color:var(--txt); line-height:1.35; min-width:0;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+}
+.sw-row-selected{
+  background:color-mix(in srgb, var(--teal) 14%, transparent);
+  border-color:var(--teal); border-left-color:var(--teal);
+}
+.sw-row-blocked{opacity:.45; cursor:not-allowed}
+.sw-row-blocked:hover{border-color:transparent; border-left-color:var(--txt-dim)}
+/* Selectable (a UI item can be reshaped into headless work in the notes),
+   but marked as the exception it is. */
+.sw-row-ui{border-left-color:var(--amber)}
+.sw-row-ui .sw-row-title{color:var(--txt-dim)}
+
+/* ---- already-filed items ----
+   Dimmed, not hidden: the item IS still open in TODO.md, and its card may
+   have failed. A signal to look before re-filing, not a bar on doing it. */
+.sw-row-filed{border-left-color:var(--cyan-dim)}
+.sw-row-filed .sw-row-title{color:var(--txt-dim)}
+.sw-filed{
+  flex-shrink:0; margin-left:auto; cursor:pointer; white-space:nowrap;
+  font-size:9.5px; color:var(--txt-dim);
+  border:1px solid var(--line); border-radius:9px; padding:1px 7px;
+}
+.sw-filed:hover{border-color:var(--cyan); color:var(--cyan)}
+.sw-filed b{font-family:'Orbitron'; font-size:8.5px; letter-spacing:1px}
+.sw-filed-note{font-family:'Rajdhani'; font-size:11px; letter-spacing:0; color:var(--txt-dim)}
+.sw-selected-filed{
+  font-size:12.5px; line-height:1.45; color:var(--txt-dim); margin-bottom:9px;
+  padding:7px 9px; border:1px solid var(--line); border-left:2px solid var(--cyan-dim);
+  border-radius:5px; background:color-mix(in srgb, var(--cyan) 7%, transparent);
+}
+.sw-selected-filed a{color:var(--cyan)}
+
+/* ---- form side ---- */
+.sw-bar{
+  flex:0 0 auto; display:flex; align-items:center; gap:10px;
+  font-family:'Orbitron'; font-size:8.5px; letter-spacing:2px;
+  color:var(--txt-dim); padding:7px 9px 5px; border-bottom:1px solid var(--line);
+}
+/* Sits in the SELECTED ITEM bar rather than under the text: the way out of a
+   selection has to be visible without scrolling a long item to the bottom. */
+.sw-clear{
+  margin-left:auto; background:none; border:1px solid var(--line); border-radius:6px;
+  color:var(--txt-dim); font-family:'Rajdhani'; font-size:11px; letter-spacing:0;
+  padding:2px 8px; cursor:pointer;
+}
+.sw-clear:hover{border-color:var(--red); color:var(--red)}
+.sw-selected-ui{
+  font-size:12.5px; line-height:1.45; color:var(--amber); margin-bottom:9px;
+  padding:7px 9px; border:1px solid var(--line); border-left:2px solid var(--amber);
+  border-radius:5px; background:color-mix(in srgb, var(--amber) 8%, transparent);
+}
+.sw-parent{
+  flex:0 0 auto; margin:7px 9px 0; padding:6px 9px;
+  background:var(--bg); border:1px solid var(--line); border-radius:6px;
+  color:var(--txt); font-family:'Rajdhani'; font-size:12.5px; outline:none;
+}
+.sw-parent:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+.sw-selected{
+  flex:1 1 auto; min-height:0; overflow-y:auto; padding:9px;
+  font-size:14px; line-height:1.5; color:var(--txt);
+  scrollbar-width:thin; scrollbar-color:var(--line) transparent;
+}
+.sw-placeholder{color:var(--txt-dim); font-size:13px}
+.sw-selected-section{
+  font-family:'Orbitron'; font-size:8.5px; letter-spacing:1.5px; text-transform:uppercase;
+  color:var(--cyan-dim); margin-bottom:7px;
+}
+.sw-selected-text{white-space:normal; overflow-wrap:anywhere}
 .sw-notes{
-  margin:10px; padding:9px 11px; font-family:'Rajdhani'; font-size:15px;
-  background:#0a1420; color:var(--txt); border:1px solid var(--line); outline:none;
-  min-height:70px; resize:vertical;
+  flex:0 0 auto; height:74px; resize:none; margin:7px 9px; padding:7px 9px;
+  background:var(--bg); border:1px solid var(--line); border-radius:6px;
+  color:var(--txt); font-family:'Rajdhani'; font-size:13px; outline:none;
 }
 .sw-notes:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
-.sw-submit{margin:0 10px 6px; align-self:flex-start}
-.sw-submit:disabled{opacity:.4; cursor:not-allowed}
-.sw-status{padding:0 10px 10px; font-size:13px}
-
-/* my submissions — pending / needs follow-up / finished, tracked against
-   the live board so a filed card doesn't just vanish into the kanban tab */
-.sw-subs{display:flex; flex-direction:column; gap:10px; padding:0 10px 12px}
-.sw-sub-group{border:1px solid var(--line); background:#050d16cc}
-.sw-sub-label{
-  font-family:'Orbitron'; font-size:9.5px; letter-spacing:1.5px; color:var(--txt-dim);
-  padding:6px 9px; border-bottom:1px solid var(--line);
+.sw-actions{
+  flex:0 0 auto; display:flex; align-items:center; gap:10px; padding:0 9px 9px;
 }
-.sw-sub-list{display:flex; flex-direction:column; gap:1px; max-height:22vh; overflow-y:auto}
-.sw-sub-empty{padding:8px 9px; font-size:12px; color:var(--txt-dim)}
-.sw-sub-row{padding:7px 9px; cursor:pointer; border-bottom:1px solid var(--line-dim,var(--line))}
-.sw-sub-row:last-child{border-bottom:none}
-.sw-sub-row:hover{background:#0a1420}
-.sw-sub-row.sw-sub-archived{opacity:.45}
-.sw-sub-top{display:flex; justify-content:space-between; align-items:center}
-.sw-sub-top b{font-family:'Orbitron'; font-size:9.5px; letter-spacing:1px}
-.sw-sub-age{font-size:10px; color:var(--txt-dim)}
-.sw-sub-title{font-size:13px; color:var(--txt); margin-top:3px}
-.sw-sub-archive-btn{margin-top:6px; font-size:10px; padding:4px 9px}
+/* `button.btn` is element+class, so a single-class rule loses the cascade. */
+button.btn.sw-submit{padding:7px 14px; font-size:10px}
+button.btn.sw-submit:disabled{opacity:.4; cursor:not-allowed}
+.sw-status{font-size:12.5px; min-width:0; overflow:hidden; text-overflow:ellipsis}
+
+
+/* ---- GPU vertical bar rack (snarf's two Quadro RTX 6000s) ----------------
+   Vertical, not horizontal: the GPUs are the fleet's scarcest resource (one
+   model in the seat at a time), and a column reads as a level the way a
+   horizontal bar does not. Two bars per card — UTIL is what the GPU is doing
+   now, VRAM is what the resident model has locked up, and they move
+   independently: an idle seat still shows ~92% VRAM because the weights stay
+   loaded. Track/fill use theme vars so the light toggle doesn't break them. */
+.gpu-rack{display:flex; gap:10px; justify-content:space-around; padding:6px 0 2px}
+.gpu-card{display:flex; flex-direction:column; align-items:center; gap:4px; flex:1}
+.gpu-bars{display:flex; gap:5px; align-items:flex-end; height:88px}
+/* The track must read as an EMPTY GAUGE, not as a missing element: an idle
+   GPU sits at 0% util, and on a bare dark background that looked broken
+   rather than idle. Explicit border + lifted inner fill fixes that. */
+.gpu-bar{position:relative; width:15px; height:100%;
+  background:color-mix(in srgb, var(--cyan) 9%, transparent);
+  border:1px solid color-mix(in srgb, var(--cyan) 26%, transparent);
+  border-radius:3px; overflow:hidden}
+.gpu-bar.vram{background:color-mix(in srgb, var(--magenta) 9%, transparent);
+  border-color:color-mix(in srgb, var(--magenta) 26%, transparent)}
+.gpu-bar i{position:absolute; left:0; right:0; bottom:0; display:block; height:0%;
+  background:linear-gradient(180deg, var(--cyan), var(--cyan-dim)); transition:height .5s ease}
+.gpu-bar.vram i{background:linear-gradient(180deg, var(--magenta), color-mix(in srgb, var(--magenta) 45%, #000))}
+/* 25% gridlines so a glance reads a level, not just a blob */
+.gpu-bar::after{content:""; position:absolute; inset:0; pointer-events:none;
+  background:repeating-linear-gradient(180deg, transparent 0 21px,
+    color-mix(in srgb, var(--bg) 55%, transparent) 21px 22px)}
+.gpu-caps{display:flex; gap:5px}
+.gpu-caps span{width:15px; text-align:center; font-size:7.5px; letter-spacing:.3px;
+  color:var(--txt-dim)}
+.gpu-name{font-family:'Orbitron'; font-size:9px; letter-spacing:2px; color:var(--cyan)}
+.gpu-stats{font-size:10px; color:var(--txt-dim); text-align:center; line-height:1.35}
+.gpu-stats b{font-weight:600}
+.gpu-t-ok{color:var(--teal)} .gpu-t-warm{color:var(--amber)} .gpu-t-hot{color:var(--red)}
+.gpu-offline{font-size:11px; color:var(--txt-dim); text-align:center; padding:14px 0}
+
+/* ---- MACHINES: fixed metric columns ------------------------------------
+   Was a "·"-joined string right-aligned per row, so MEM sat at a different x
+   on every line and comparing two machines meant reading instead of glancing.
+   Fixed columns make the panel scannable down each metric. The name column
+   flexes; the five metric cells do not. */
+.mach-hdr, .mach-row{display:grid; grid-template-columns:1fr repeat(5, 30px);
+  gap:3px; align-items:center}
+.mach-hdr{font-size:8px; letter-spacing:.6px; color:var(--txt-dim);
+  padding:0 0 3px; border-bottom:1px solid var(--line); margin-bottom:3px}
+.mach-hdr span{text-align:right}
+.mach-row{font-size:12px; padding:1.5px 0}
+.mach-name{display:flex; align-items:center; gap:6px; overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap}
+/* The dot is a flex item inside an overflow:hidden cell, so a long name
+   squeezed it to zero width and the row silently lost its status indicator --
+   on exactly the rows with the longest names. Never let it shrink. */
+.mach-name .dot{flex:0 0 auto}
+.mach-c{text-align:right; font-size:10.5px; color:var(--teal); font-weight:600;
+  font-variant-numeric:tabular-nums}
+/* A metric a host cannot report is a mid-dot, not a zero: absent and zero are
+   different facts and must not look alike. */
+.mach-nil{color:var(--txt-dim); font-weight:400}
+.mach-c.err{color:var(--red)} .mach-c.warn{color:var(--amber)}
+.mach-note{grid-column:2 / -1; text-align:right; font-size:10.5px; color:var(--txt-dim)}

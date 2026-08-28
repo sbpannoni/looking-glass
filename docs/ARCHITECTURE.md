@@ -76,6 +76,22 @@ STT finalize ~0.7 s · Hermes first token 1–3 s (more with tools) · first
 audible audio ~3 s · total simple turn ~4 s. The biggest lever is the LLM
 behind Hermes; the second is the Whisper model size.
 
+## Agent work: kanban, dispatch, and task isolation
+
+The HUD's own chat session is not where agentic work happens. Each kanban card
+runs in its own Hermes session on CT111 and, for DARKHELIX cards, its own git
+worktree on snarf.
+
+Isolation is provisioned at **claim time** by the `kanban_task_claimed` plugin
+hook, which calls `POST /api/kanban/provision` here — so it covers every card
+regardless of who created it (SUBMIT WORK, the auto-decomposer, the CLI, the
+dashboard), not just the ones this HUD filed. `POST /api/kanban/create` calls
+the same function, so there is one implementation.
+
+See [TASK-ISOLATION.md](TASK-ISOLATION.md) for the full mechanism: the scope
+rules, how a card inherits its parents' branches, the dispatch-target
+contract, and what happens when provisioning fails.
+
 ## Gotchas encoded in this repo (learned the hard way)
 
 1. **SSE charset**: Hermes' event stream has no charset header; Python

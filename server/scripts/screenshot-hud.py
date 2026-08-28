@@ -14,6 +14,15 @@ Options:
     [WIDTH HEIGHT]        viewport size (default 1920x1080)
     --wait SECONDS        settle time before the shot (default 8)
     --click SELECTOR      click an element, then wait; repeatable
+    --eval JS             evaluate an expression and print its value.
+                          Interleaved with --click in the order given, so a
+                          probe reads the state at that point in the
+                          sequence, not the end state. For checking STATE a
+                          screenshot cannot show — what a <select> was
+                          populated with, or what document.elementFromPoint()
+                          returns over a control (the only way to catch a
+                          click-blocking overlay, since .click() bypasses
+                          pointer-events entirely).
     --url URL             default https://127.0.0.1/hud/
     --throttle KBPS       emulate a slow network (catches load-order races,
                           e.g. code that runs before deferred modules land)
@@ -58,7 +67,11 @@ def hud_token() -> str:
 def main() -> int:
     out = sys.argv[1] if len(sys.argv) > 1 else "hud.png"
     args = sys.argv[2:]
-    width, height, wait_s, clicks = 1920, 1080, 8.0, []
+    width, height, wait_s = 1920, 1080, 8.0
+    # One ordered list, not a list of clicks and a list of evals: a probe is
+    # only meaningful at its own point in the sequence, and running every
+    # eval after every click reports the end state for all of them.
+    actions: list[tuple[str, str]] = []
     url = "https://127.0.0.1/hud/"
     throttle_kbps = 0.0
 
@@ -71,7 +84,9 @@ def main() -> int:
         if args[i] == "--wait":
             wait_s = float(args[i + 1]); i += 2
         elif args[i] == "--click":
-            clicks.append(args[i + 1]); i += 2
+            actions.append(("click", args[i + 1])); i += 2
+        elif args[i] == "--eval":
+            actions.append(("eval", args[i + 1])); i += 2
         elif args[i] == "--url":
             url = args[i + 1]; i += 2
         elif args[i] == "--throttle":
@@ -162,14 +177,19 @@ def main() -> int:
     send("Page.navigate", {"url": url})
     pump(wait_s)
 
-    for selector in clicks:
-        result = send("Runtime.evaluate", {
-            "expression": f"(()=>{{const e=document.querySelector({json.dumps(selector)});"
-                          f"if(!e) return 'NOT FOUND'; e.click(); return 'clicked';}})()",
-            "returnByValue": True,
-        })
-        print(f"click {selector}: {result.get('result',{}).get('result',{}).get('value')}")
-        pump(5.0)
+    for kind, arg in actions:
+        if kind == "click":
+            expression = (f"(()=>{{const e=document.querySelector({json.dumps(arg)});"
+                          f"if(!e) return 'NOT FOUND'; e.click(); return 'clicked';}})()")
+        else:
+            expression = (f"(()=>{{try{{return JSON.stringify({arg});}}"
+                          f"catch(e){{return 'ERROR: '+e.message;}}}})()")
+        result = send("Runtime.evaluate", {"expression": expression, "returnByValue": True})
+        print(f"{kind} {arg}: {result.get('result',{}).get('result',{}).get('value')}")
+        # A click can kick off a fetch/render; a probe only reads what is
+        # already there, so it does not need the settle time.
+        if kind == "click":
+            pump(5.0)
 
     shot = send("Page.captureScreenshot", {"format": "png"})
     data = shot.get("result", {}).get("data")

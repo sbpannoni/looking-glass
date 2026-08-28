@@ -22,6 +22,8 @@ and approval events. Falls back to direct Anthropic ("basic mode") if unreachabl
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import re
@@ -31,6 +33,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Iterator
+from urllib.parse import quote
 
 import asyncssh
 import requests
@@ -1152,6 +1155,49 @@ async def machines() -> JSONResponse:
             return series[0].get("value")
         return None
 
+    def _rack_by(key: str, label: str) -> dict:
+        """One Prometheus result set, indexed by a label instead of taking [0].
+
+        Taking series[0] is why MACHINES only ever showed one box's numbers:
+        `node_load1` returns a series per host and everything after the first
+        was thrown away.
+        """
+        out: dict = {}
+        series = rack.get(key)
+        if isinstance(series, list):
+            for r in series:
+                k = (r.get("labels") or {}).get(label)
+                if k is not None:
+                    out[str(k)] = r.get("value")
+        return out
+
+    host_load = _rack_by("fleet_load1", "host")
+    host_mem = _rack_by("fleet_mem_used_ratio", "host")
+    host_disk = _rack_by("fleet_disk_used_ratio", "host")
+    host_uptime = _rack_by("fleet_uptime_seconds", "host")
+    host_swap = _rack_by("fleet_swap_used_ratio", "host")
+    guest_cpu = _rack_by("guest_cpu_ratio", "id")
+    guest_mem_used = _rack_by("guest_mem_used_bytes", "id")
+    guest_mem_total = _rack_by("guest_mem_total_bytes", "id")
+
+    _virt_cfg = (CFG.get("ownership") or {}).get("virt") or {}
+
+    def _guest_id(node_id: str) -> str | None:
+        """topology node -> Proxmox guest id, reusing ownership.virt.
+
+        ownership.virt already records CT112 / VM 100 for the HUD's QUICK
+        ACCESS tiles; deriving from it keeps one source of truth instead of a
+        second hand-maintained mapping that can drift.
+        """
+        ident = str((_virt_cfg.get(node_id) or {}).get("id") or "")
+        m = re.match(r"\s*CT\s*(\d+)", ident, re.I)
+        if m:
+            return f"lxc/{m.group(1)}"
+        m = re.match(r"\s*VM\s*(\d+)", ident, re.I)
+        if m:
+            return f"qemu/{m.group(1)}"
+        return None
+
     # Physical hosts first, then containers, then services and out-of-band. The
     # OOB rows earn their place: a BMC that answers while its host is dark is
     # exactly how a mains cut is told apart from a machine that crashed.
@@ -1189,23 +1235,52 @@ async def machines() -> JSONResponse:
             "physical_group": node.get("physical_group"),
         }
 
-        if node["id"] == "looking-glass" and psutil:
+        nid = node["id"]
+
+        # This host measures itself: psutil is more accurate than scraping our
+        # own exporter, so it wins where available.
+        if nid == "looking-glass" and psutil:
             info.update({
                 "cpu": psutil.cpu_percent(interval=0.1),
                 "mem": psutil.virtual_memory().percent,
                 "disk": psutil.disk_usage(str(ROOT)).percent,
             })
-        elif node["id"] == "snarf":
+
+        # node_exporter, for anything that runs one (snarf, beelink,
+        # claude-control). Keyed by host label == topology id.
+        if nid in host_load:
+            info["load1"] = round(host_load[nid], 2)
+        if "mem" not in info and nid in host_mem:
+            info["mem"] = round(host_mem[nid] * 100, 1)
+            info["mem_source"] = "node"      # MemAvailable-based: real pressure
+        if "disk" not in info and nid in host_disk:
+            info["disk"] = round(host_disk[nid] * 100, 1)
+        if nid in host_uptime:
+            info["uptime_s"] = int(host_uptime[nid])
+        if nid in host_swap:
+            info["swap"] = round(host_swap[nid] * 100, 1)
+
+        # Proxmox guest series fill the gap for containers with no exporter of
+        # their own -- hermes being the one that mattered.
+        gid = _guest_id(nid)
+        if gid:
+            if "cpu" not in info and gid in guest_cpu:
+                info["cpu"] = round(guest_cpu[gid] * 100, 1)
+            if "mem" not in info and gid in guest_mem_used and guest_mem_total.get(gid):
+                info["mem"] = round(guest_mem_used[gid] / guest_mem_total[gid] * 100, 1)
+                # NOT comparable to the node_exporter figure. For a QEMU guest
+                # with no balloon target this counts pages the guest has TOUCHED,
+                # so Linux page cache drives it to the ceiling and it plateaus
+                # there forever. home-assistant sat at a flat 93-94% for 14 days
+                # with no upward trend -- normal steady state, not pressure.
+                # Tagged so the UI does not red-flag it against a threshold
+                # meant for MemAvailable.
+                info["mem_source"] = "guest-allocated"
+
+        if nid == "snarf":
             temp = _rack_value("snarf_gpu_temp_c")
-            load = _rack_value("snarf_cpu_load1")
             if temp is not None:
                 info["gpu_temp"] = round(temp)
-            if load is not None:
-                info["load1"] = round(load, 2)
-        elif node["id"] == "beelink":
-            load = _rack_value("beelink_cpu_load1")
-            if load is not None:
-                info["load1"] = round(load, 2)
 
         stats = worker_stats.get(str(node.get("address")))
         if stats:
@@ -2183,12 +2258,118 @@ async def _kanban_ssh(cmd: str) -> tuple[int, str]:
     return await _ssh_run(_kanban_cfg().get("host", "hermes"), cmd)
 
 
+# --- Hermes kanban plugin API ---------------------------------------------
+# Two ways to reach the board on CT111: exec `hermes kanban` over ssh (a
+# process spawn and ~380ms per call), or the dashboard's own kanban plugin
+# REST API at /api/plugins/kanban. The API wins on every axis -- one HTTP
+# round trip, columns already ordered by the board's own status model, 42
+# fields per card instead of the 9 `ls --json` keeps, and a real per-task
+# endpoint -- so it is the primary path and ssh stays as the fallback for
+# when the dashboard is down. Neither path is authoritative on its own: the
+# board degrades to the CLI rather than breaking.
+#
+# Auth is the dashboard's interactive session-cookie flow. There is NO
+# service-token path -- the bearer seam only guards routes that call
+# register_token_route(), and only the drain plugin does that -- so the HUD
+# logs in with the configured basic-auth credential and holds the cookies on
+# a requests.Session. The access cookie lasts 12h and the refresh cookie 30d,
+# and the dashboard rotates the access token transparently, so a re-login is
+# an exception path (401), not something to schedule.
+_KANBAN_API_LOCK = threading.Lock()
+_KANBAN_API_SESSION: requests.Session | None = None
+
+
+def _kanban_api_base() -> str:
+    return (os.environ.get("HERMES_DASHBOARD_URL")
+            or _kanban_cfg().get("dashboard_url") or "").rstrip("/")
+
+
+def _kanban_api_login(session: requests.Session, base: str) -> None:
+    user = os.environ.get("HERMES_DASHBOARD_USER", "")
+    password = os.environ.get("HERMES_DASHBOARD_PASSWORD", "")
+    if not user or not password:
+        raise RuntimeError("HERMES_DASHBOARD_USER / HERMES_DASHBOARD_PASSWORD not set")
+    r = session.post(f"{base}/auth/password-login", timeout=20,
+                     json={"provider": "basic", "username": user, "password": password})
+    if r.status_code != 200:
+        raise RuntimeError(f"dashboard login failed: {r.status_code}")
+
+
+def _kanban_api_call(method: str, path: str, **kwargs) -> requests.Response:
+    """One authenticated call to the plugin API, re-logging in once on 401.
+
+    Blocking on purpose -- callers go through asyncio.to_thread, same as the
+    rest of this server's outbound HTTP."""
+    global _KANBAN_API_SESSION
+    base = _kanban_api_base()
+    if not base:
+        raise RuntimeError("kanban.dashboard_url is not configured")
+    with _KANBAN_API_LOCK:
+        session = _KANBAN_API_SESSION
+        just_logged_in = session is None
+        if session is None:
+            session = requests.Session()
+            _kanban_api_login(session, base)
+            _KANBAN_API_SESSION = session
+    r = session.request(method, f"{base}{path}", timeout=30, **kwargs)
+    # A 401 on a session we did not just mint means the cookies lapsed (or the
+    # dashboard restarted and rotated its signing secret). One re-login, one
+    # retry; a 401 straight after a fresh login is a bad credential, not a
+    # stale cookie, so it propagates instead of looping.
+    if r.status_code == 401 and not just_logged_in:
+        with _KANBAN_API_LOCK:
+            _kanban_api_login(session, base)
+        r = session.request(method, f"{base}{path}", timeout=30, **kwargs)
+    r.raise_for_status()
+    return r
+
+
+async def _kanban_api_get(path: str) -> dict:
+    r = await asyncio.to_thread(_kanban_api_call, "GET", path)
+    return r.json()
+
+
+# The CLI's --json carries the first ten; the rest exist only on the plugin
+# API and are what let a card show its state instead of just a status word.
+_KANBAN_TASK_FIELDS = (
+    "id", "title", "status", "assignee", "created_by", "created_at",
+    "started_at", "completed_at", "result", "session_id",
+    "age", "priority", "progress", "comment_count", "link_counts",
+    "latest_summary", "model_override", "block_kind", "current_run_id",
+    "last_failure_error",
+)
+
+
+def _kanban_task_slim(task: dict) -> dict:
+    return {k: task.get(k) for k in _KANBAN_TASK_FIELDS if k in task}
+
+
 @app.get("/api/kanban")
 async def kanban_board() -> JSONResponse:
+    """The board.
+
+    `tasks` keeps its original contract -- a flat list, newest first -- so
+    every existing caller is unaffected. `columns` is additive: the plugin
+    API already groups cards into the board's own ordered statuses, which is
+    what a lane view needs and what the CLI path cannot produce."""
+    try:
+        board = await _kanban_api_get("/api/plugins/kanban/board")
+        columns = [{"name": c.get("name"),
+                    "tasks": [_kanban_task_slim(t) for t in c.get("tasks") or []]}
+                   for c in board.get("columns") or []]
+        tasks = [t for col in columns for t in col["tasks"]]
+        tasks.sort(key=lambda t: t.get("created_at") or 0, reverse=True)
+        return JSONResponse({"tasks": tasks, "columns": columns,
+                             "assignees": board.get("assignees") or [],
+                             "latest_event_id": board.get("latest_event_id"),
+                             "source": "api"})
+    except Exception as exc:
+        api_error = str(exc)
     try:
         _, out = await _kanban_ssh("hermes kanban ls --json --sort created-desc")
     except Exception as exc:
-        return JSONResponse({"tasks": [], "error": str(exc)}, status_code=502)
+        return JSONResponse({"tasks": [], "error": f"{api_error}; ssh fallback: {exc}"},
+                            status_code=502)
     try:
         data = json.loads(out.strip() or "[]")
     except json.JSONDecodeError:
@@ -2196,7 +2377,8 @@ async def kanban_board() -> JSONResponse:
     rows = data if isinstance(data, list) else data.get("tasks", [])
     keep = ("id", "title", "status", "assignee", "created_by", "created_at",
             "started_at", "completed_at", "result", "session_id")
-    return JSONResponse({"tasks": [{k: t.get(k) for k in keep} for t in rows]})
+    return JSONResponse({"tasks": [{k: t.get(k) for k in keep} for t in rows],
+                         "source": "ssh", "api_error": api_error})
 
 
 _TASK_ID_RE = re.compile(r"^t_[0-9a-f]{6,}$")
@@ -2215,6 +2397,47 @@ async def kanban_unblock(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
     try:
         rc, out = await _kanban_ssh(f"hermes kanban unblock {shlex.quote(task_id)}")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": out[-1000:]}, status_code=502)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/kanban/reclaim")
+async def kanban_reclaim(request: Request) -> JSONResponse:
+    """Release the worker claim on a stuck `running` card via
+    `hermes kanban reclaim <id>`.
+
+    What that actually does (hermes_cli/kanban_db.py:reclaim_task, read
+    2026-08-28): SIGTERM then SIGKILL the worker process if its claim lock is
+    host-local, clear claim_lock/claim_expires/worker_pid, close the current
+    run with outcome `reclaimed`, and set the card to `ready`.
+
+    `ready` is DISPATCHABLE. The card does not park -- the gateway dispatcher
+    picks it up on its next pass and starts a fresh run, at the cost of
+    another model run. It does NOT touch consecutive_failures, so this can be
+    done repeatedly without tripping the retry circuit breaker.
+
+    This is the missing half of the board's manual controls. Blocked cards
+    had Unblock and done cards had Archive, but a card whose worker died --
+    the runtime cap fired, the model endpoint went away, the gateway was
+    restarted mid-run -- stays `running` forever with the claim still held,
+    and nothing in the HUD could move it. The dispatcher's own stale-claim
+    sweep only runs on its tick and only past its own timeout; this is the
+    user-driven path for the card that is already visibly wedged.
+
+    A reason is recorded on the reclaimed event so the card's history says a
+    human did this, rather than it looking like another silent requeue."""
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    reason = "reclaimed from the Looking Glass board"
+    try:
+        rc, out = await _kanban_ssh(
+            f"hermes kanban reclaim {shlex.quote(task_id)} "
+            f"--reason {shlex.quote(reason)}")
     except Exception as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
     if rc != 0:
@@ -2268,6 +2491,35 @@ _TODO_HEADING_RE = re.compile(r"^#{1,3}\s+(.*)$")
 _TODO_STATUS_TAG_RE = re.compile(r"^\*\*(WIP|WAITING)\*\*\s*")
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
+# Work that cannot be done by a dispatched worker at all: it needs a human
+# driving a real Electron window against real outputs. TODO.md says so in
+# its own words -- section 6 is literally titled "UI — needs a live Electron
+# session against real outputs" -- but nothing read that, so six items no
+# agent can execute sat in the picker looking submittable. Filing one costs
+# a full dispatch that can only ever come back asking for a UI.
+#
+# Deliberately narrow phrases, matched against the section heading and the
+# item's own text. A bare mention of "UI" is not enough: item 2's
+# "genuinely ready, no known UI issues" is exactly the kind of line a loose
+# /\bUI\b/ would misfile as unsubmittable.
+_TODO_NEEDS_UI_RE = re.compile(
+    r"(live|real|manual|interactive)\s+(electron|ui|gui)\s+(session|run)"
+    r"|(electron|ui|gui)\s+session"
+    r"|needs?\s+a\s+(live\s+)?(electron|ui|gui)"
+    r"|requires?\s+a\s+(live\s+)?(electron|ui|gui)",
+    re.IGNORECASE,
+)
+
+
+def _todo_needs_ui(section: str | None, text: str) -> bool:
+    """True when this item can only be done in a live UI session.
+
+    The section heading counts as much as the item text: TODO.md states the
+    requirement once, at the top of the section, and then does not repeat it
+    on each of the six items beneath it."""
+    return bool(_TODO_NEEDS_UI_RE.search(section or "")
+                or _TODO_NEEDS_UI_RE.search(text or ""))
+
 
 async def _fleet_ssh(host_key: str, cmd: str) -> tuple[int, str]:
     """Same mechanism as _kanban_ssh, parameterized by host key -- lets
@@ -2293,7 +2545,7 @@ def _parse_darkhelix_todo(text: str) -> list[dict]:
             items.append(current)
             current = None
 
-    for line in text.splitlines():
+    for line_no, line in enumerate(text.splitlines()):
         h = _TODO_HEADING_RE.match(line)
         if h:
             flush()
@@ -2312,6 +2564,11 @@ def _parse_darkhelix_todo(text: str) -> list[dict]:
                 "done": m.group(1).strip().lower() == "x",
                 "status_tag": tag,
                 "text": rest.strip(),
+                # Which line the checkbox itself is on. The write-back edits
+                # that one line in place rather than re-serialising the file,
+                # so everything this parser does not model -- prose between
+                # sections, nested bullets, tables -- survives untouched.
+                "line": line_no,
             }
             continue
         if current is not None:
@@ -2334,10 +2591,778 @@ def _parse_darkhelix_todo(text: str) -> list[dict]:
             "section": it["section"],
             "blocked": it["status_tag"] == "WAITING",
             "wip": it["status_tag"] == "WIP",
+            "needs_ui": _todo_needs_ui(it["section"], cleaned),
+            "line": it["line"],
             "text": cleaned,
             "title": cleaned.split("\n")[0][:140],
         })
     return result
+
+
+# --------------------------------------------- DARKHELIX worktree isolation
+# Before this, every kanban worker SSHed to snarf and edited the ONE shared
+# checkout on master. Cards carried a `[dispatch-target] branch: wt/...` line
+# that nothing ever read: no branch and no worktree was created, so five days
+# of agent work (552 lines across four cards) sat uncommitted and
+# indistinguishable in the main tree until it was salvaged by hand.
+#
+# Isolation is created HERE, at submit time, over the connection pool this
+# server already holds -- not delegated to the agent. An agent that has to be
+# told to isolate itself is exactly what failed.
+#
+# Branch and path derive from the TASK ID, never from the card body: the
+# triage specifier rewrites title and body on promotion, so anything parsed
+# back out of the body is untrustworthy by the time it matters.
+DARKHELIX_WT_ROOT = "/home/sam/darkhelix-wt"   # `sam` cannot write at /ssdpool root
+DARKHELIX_BASE_BRANCH = "master"
+
+# The repo is 1.5 TB on disk and 5.7 MB of tracked source -- the rest is
+# databases and reference data git does not carry. A worktree gets the source
+# in ~6 MB; these are shared back by symlink so a card can actually RUN.
+# Outputs are deliberately absent from this list: DARKHELIX_output/ and
+# testruns/ stay per-worktree so two cards cannot overwrite each other.
+DARKHELIX_SHARED = ("database", "thirdParty", "testData", ".venv-dev")
+
+
+def _dh_branch(task_id: str) -> str:
+    return f"hermes/{task_id}"
+
+
+def _dh_worktree(task_id: str) -> str:
+    return f"{DARKHELIX_WT_ROOT}/{task_id}"
+
+
+# The dispatch-target block is the contract between this server (which
+# provisions isolation) and the worker (which must use it and nothing else).
+# `execution-engine-dispatch`'s SKILL.md step 1 refuses to work a card without
+# a valid one, so "valid" has to mean the same thing on both sides.
+_DISPATCH_TARGET_RE = re.compile(
+    r"\[dispatch-target\](?P<inner>.*?)\[/dispatch-target\]", re.S)
+
+
+# Everything this server writes onto a card lives INSIDE the block, prose
+# included, so re-provisioning replaces the note wholesale. When only the
+# bracketed header was replaceable, each re-provision stripped the header and
+# left the previous prose behind, stacking another copy of "Work in the
+# worktree above..." on every pass.
+_DT_NOTES_SEP = "--- notes ---"
+
+
+def _dispatch_target_fields(body: str) -> dict[str, str]:
+    m = _DISPATCH_TARGET_RE.search(body or "")
+    if not m:
+        return {}
+    fields: dict[str, str] = {}
+    for line in m.group("inner").splitlines():
+        # The human half is free prose and several of its lines contain a
+        # colon ("IN YOUR TREE: ..."), so parsing must stop here or it
+        # invents fields out of sentences.
+        if line.strip() == _DT_NOTES_SEP:
+            break
+        if ":" in line:
+            k, _, v = line.partition(":")
+            fields[k.strip().lower()] = v.strip()
+    return fields
+
+
+def _dispatch_target_is_current(body: str, task_id: str) -> bool:
+    """True only for a block this server's CURRENT provisioning wrote.
+
+    Deliberately strict, because a stale block is worse than none: the first
+    HUD create path wrote `[dispatch-target] branch: wt/<slug>-<epoch>` with
+    no worktree line and created nothing, and the decomposer's LLM then copied
+    that dead branch name into every child body. Cards carrying that older
+    shape must be re-provisioned, not skipped as "already done", so the test
+    is for the exact worktree + branch this server would create now."""
+    fields = _dispatch_target_fields(body)
+    return (fields.get("worktree") == _dh_worktree(task_id)
+            and fields.get("branch") == _dh_branch(task_id))
+
+
+async def _darkhelix_worktree_create(
+        task_id: str, parent_task_ids: list[str] | None = None) -> dict:
+    """Create the card's isolated worktree on snarf. Idempotent.
+
+    Returns (ok, output, base) where `base` describes what the branch was cut
+    from -- which is the whole point of `parent_task_ids`.
+
+    ISOLATION IS NOT INDEPENDENCE. Every card branching from origin/master is
+    right for unrelated work and wrong for work that builds on work: the
+    second card of a pair opens a tree with no trace of the first, so it
+    re-derives, re-invents, or re-implements what already exists on the
+    sibling branch -- and then the two conflict at land time. When parent
+    cards are named, this cuts from a PARENT'S branch instead, so the child
+    starts from the parents' committed results.
+
+    MULTIPLE PARENTS are the normal case, not an edge case: the decomposer
+    emits a dependency graph, and its root card lists every leaf as a parent.
+    The first existing parent branch becomes the base and the rest are merged
+    in. A merge that conflicts is aborted, not forced -- the tree stays on the
+    clean base and the unmerged parents are named in the output so the card
+    can say so. Silently dropping a parent's work is the failure this whole
+    function exists to prevent, so it must never be silent.
+
+    A parent's branch is used only if it actually exists: a parent whose own
+    isolation failed, or that predates this mechanism, is skipped rather than
+    failing the child. Uncommitted work in a parent's worktree is NOT
+    inherited -- a branch tip is what git can hand over -- which is the honest
+    boundary, and why the card body states the base it actually got."""
+    branch, wt = _dh_branch(task_id), _dh_worktree(task_id)
+    parent_branches = [_dh_branch(p) for p in (parent_task_ids or [])]
+    # `[ -e X ] ||` matters: `ln -sfn target testData` when testData is already
+    # a real tracked directory in the checkout does NOT replace it, it creates
+    # testData/testData inside it. Only link names the worktree doesn't have.
+    links = " && ".join(
+        f"([ -e {shlex.quote(d)} ] || ln -s "
+        f"{shlex.quote(DARKHELIX_REPO_PATH + '/' + d)} {shlex.quote(d)})"
+        for d in DARKHELIX_SHARED
+    )
+    # .gitignore ignores these as `database/`, `thirdParty/`, `.venv-dev/` --
+    # patterns with a trailing slash, which match a DIRECTORY. In the primary
+    # checkout they are directories, so they are ignored. In a worktree they
+    # are SYMLINKS, which git sees as files, so the patterns miss and all
+    # three show up as untracked -- one `git add -A` away from committing
+    # absolute snarf paths into the repo. `info/exclude` lives in the common
+    # git dir, so writing it once covers every worktree, and it is local: it
+    # is never committed and never shows in a diff. Idempotent via grep.
+    excludes = "; ".join(
+        f"grep -qxF {shlex.quote(d)} \"$GITCOMMON/info/exclude\" 2>/dev/null || "
+        f"echo {shlex.quote(d)} >> \"$GITCOMMON/info/exclude\""
+        for d in DARKHELIX_SHARED
+    )
+    default_base = f"origin/{DARKHELIX_BASE_BRANCH}"
+    # Resolve the base on snarf, not here: only the repo knows which parent
+    # branches exist. It echoes the outcome back on BASE=/MERGED=/UNMERGED=
+    # lines so the card can state what it was actually cut from rather than
+    # what was asked for.
+    quoted_parents = " ".join(shlex.quote(b) for b in parent_branches)
+    pick_base = (
+        f"BASE={shlex.quote(default_base)}; MERGED=''; UNMERGED=''; MISSING=''; "
+        + (f"for PB in {quoted_parents}; do "
+           f'  if ! git rev-parse --verify --quiet "$PB" >/dev/null; then '
+           f'    MISSING="$MISSING $PB"; continue; fi; '
+           f'  if [ "$BASE" = {shlex.quote(default_base)} ]; then BASE="$PB"; '
+           f'  else MERGE_LIST="$MERGE_LIST $PB"; fi; '
+           f"done; " if parent_branches else "")
+        + 'echo "BASE=$BASE"; echo "MISSING=$MISSING"; '
+    )
+    # Merges happen inside the new worktree, after it exists. `|| true` on the
+    # loop keeps `set -e` from killing the whole provisioning on a conflict --
+    # a conflicted merge is a reportable outcome, not a failed provision.
+    merge_extra = (
+        'for PB in $MERGE_LIST; do '
+        '  if git merge --no-edit -q "$PB" >/dev/null 2>&1; then MERGED="$MERGED $PB"; '
+        '  else git merge --abort >/dev/null 2>&1 || true; UNMERGED="$UNMERGED $PB"; fi; '
+        'done; echo "MERGED=$MERGED"; echo "UNMERGED=$UNMERGED"; '
+    ) if parent_branches else 'echo "MERGED="; echo "UNMERGED="; '
+    cmd = (
+        f"if [ -d {shlex.quote(wt)} ]; then echo 'worktree already present'; "
+        f'echo "BASE=$(cd {shlex.quote(wt)} && git rev-parse --abbrev-ref HEAD)"; '
+        f'echo "MISSING="; echo "MERGED="; echo "UNMERGED="; exit 0; fi; '
+        f"set -e; mkdir -p {shlex.quote(DARKHELIX_WT_ROOT)}; "
+        f"cd {shlex.quote(DARKHELIX_REPO_PATH)}; git fetch origin --quiet; "
+        f"MERGE_LIST=''; MISSING=''; {pick_base}"
+        f'git worktree add {shlex.quote(wt)} -b {shlex.quote(branch)} "$BASE"; '
+        f"cd {shlex.quote(wt)}; {links}; "
+        f'GITCOMMON="$(git rev-parse --git-common-dir)"; mkdir -p "$GITCOMMON/info"; '
+        f"{excludes}; {merge_extra}"
+    )
+    try:
+        rc, out = await _fleet_ssh("snarf", cmd + " 2>&1")
+    except Exception as exc:
+        return {"ok": False, "output": str(exc), "base": default_base,
+                "merged": [], "unmerged": [], "missing": []}
+
+    text = out.strip()
+
+    def _line(prefix: str) -> str:
+        return next((ln[len(prefix):].strip() for ln in text.splitlines()
+                     if ln.startswith(prefix)), "")
+
+    base = _line("BASE=") or default_base
+    merged = _line("MERGED=").split()
+    unmerged = _line("UNMERGED=").split()
+    missing = _line("MISSING=").split()
+    # Structured, not a packed display string. What lands on the card is a
+    # claim about which parents' work is really in the tree, and a caller that
+    # has to substring-match "CONFLICTED" out of a base ref will eventually
+    # get that claim wrong.
+    return {
+        "ok": rc == 0,
+        "output": text,
+        "base": base,
+        "merged": merged,
+        "unmerged": unmerged,
+        "missing": missing,
+    }
+
+
+# ------------------------------------------------- provisioning, one path
+# Isolation used to be created in exactly one place: /api/kanban/create, the
+# SUBMIT WORK button. Every other way a card reaches this board -- the
+# auto-decomposer fanning a triage card into a dependency graph, `hermes
+# kanban create` by hand, the dashboard, a swarm -- produced a card with no
+# worktree and no dispatch-target, and the worker then edited the ONE shared
+# /ssdpool/DARKHELIX checkout. That is not a decomposer bug; it is a bug in
+# provisioning only one entry point out of several.
+#
+# So provisioning lives HERE, callable, and there are two callers: the create
+# endpoint (at file time) and /api/kanban/provision, which the Hermes
+# `kanban_task_claimed` plugin hook calls in the dispatcher immediately before
+# the worker subprocess spawns. Claim time is the choke point EVERY card
+# passes through no matter who created it, which is what makes this closed
+# rather than one more special case.
+
+_HUD_CREATOR = "looking-glass"
+
+
+def _darkhelix_forced_assignees() -> set[str]:
+    """Assignees whose cards are DARKHELIX work by declaration.
+
+    The lineage walk below is deliberately conservative, and conservative
+    means it misses things: a card filed straight onto the board by an agent
+    or by hand has no link to a HUD-filed card, so it is skipped even when it
+    is plainly DARKHELIX work (`t_d230ec7d`, "Scope the non-swiss-prot threats
+    gap", was exactly this). That case fails safe rather than silently -- the
+    worker's skill blocks a card with no dispatch-target -- but "fails safe"
+    is not the same as "handled", so this is the explicit way to say so.
+
+    Kept out of the inferred path on purpose: it is a declaration in
+    server.yaml, not a guess about a title."""
+    cfg = CFG.get("darkhelix") or {}
+    return {a for a in (cfg.get("provision_assignees") or []) if a}
+
+
+async def _kanban_task_detail(task_id: str) -> dict:
+    return await _kanban_api_get(f"/api/plugins/kanban/tasks/{quote(task_id)}")
+
+
+async def _darkhelix_lineage(task_id: str, detail: dict) -> tuple[bool, list[str]]:
+    """(is DARKHELIX work, immediate parent ids) for one card.
+
+    SUBMIT WORK files DARKHELIX TODO.md items and nothing else, so any card
+    connected to one is DARKHELIX work. Connectivity is walked in BOTH
+    directions because the decomposer inverts the direction you would expect:
+    it keeps the original card alive and makes it DEPEND ON every leaf it
+    produced, so from a decomposed child the HUD's own card is reached through
+    `children`, not `parents`.
+
+    A card whose component contains no HUD-filed card is left completely
+    alone. This board is DARKHELIX's today, but provisioning a worktree in
+    someone else's repo because a heuristic said "probably" is a worse failure
+    than not provisioning at all -- and the worker-side guard (SKILL.md step 1
+    blocks a card with no dispatch-target) means "left alone" fails loudly
+    rather than silently corrupting a shared checkout."""
+    task = detail.get("task") or {}
+    parents = list((detail.get("links") or {}).get("parents") or [])
+    if task.get("created_by") == _HUD_CREATOR:
+        return True, parents
+    if (task.get("assignee") or "") in _darkhelix_forced_assignees():
+        return True, parents
+
+    seen: set[str] = {task_id}
+    frontier = list(parents) + list((detail.get("links") or {}).get("children") or [])
+    # Bounded: a decomposition graph is tens of cards, but this must not be
+    # able to walk a pathological board forever inside a dispatcher hook.
+    for _ in range(200):
+        if not frontier:
+            break
+        nxt = frontier.pop(0)
+        if nxt in seen:
+            continue
+        seen.add(nxt)
+        try:
+            d = await _kanban_task_detail(nxt)
+        except Exception:
+            continue
+        if (d.get("task") or {}).get("created_by") == _HUD_CREATOR:
+            return True, parents
+        links = d.get("links") or {}
+        frontier.extend(links.get("parents") or [])
+        frontier.extend(links.get("children") or [])
+    return False, parents
+
+
+def _dispatch_target_note(task_id: str, wt: dict,
+                          parent_task_ids: list[str]) -> str:
+    """The block the worker reads.
+
+    The lineage sentence is a factual claim about which parents' work is in
+    the tree, so it is built from what git actually did, not from what was
+    asked for. Naming a parent whose branch did not exist as "already in your
+    tree" would be the same class of lie as the `wt/...` branch that started
+    all of this -- a card asserting a state of the world nothing had created.
+    """
+    base = wt.get("base") or f"origin/{DARKHELIX_BASE_BRANCH}"
+    merged = wt.get("merged") or []
+    unmerged = wt.get("unmerged") or []
+    missing = wt.get("missing") or []
+
+    def _tasks_for(branches: list[str]) -> list[str]:
+        prefix = _dh_branch("")
+        return [b[len(prefix):] for b in branches if b.startswith(prefix)]
+
+    # Whose work is genuinely present: the base branch's card, plus anything
+    # merged in cleanly.
+    present = _tasks_for([base] + merged) if base.startswith(_dh_branch("")) else _tasks_for(merged)
+    absent_conflict = _tasks_for(unmerged)
+    absent_nobranch = _tasks_for(missing)
+
+    chained = ("builds-on: " + ", ".join(parent_task_ids) + "\n") if parent_task_ids else ""
+
+    lineage = ""
+    if present:
+        lineage += (
+            f"IN YOUR TREE: the committed work of {', '.join(present)} is already\n"
+            f"here (this branch was cut from {base}"
+            + (" and merged " + ", ".join(merged) if merged else "")
+            + ").\nBuild on it; do not redo it.\n\n")
+    if absent_nobranch:
+        lineage += (
+            f"NOT IN YOUR TREE: {', '.join(absent_nobranch)} — named as parents but\n"
+            "they have no branch, so nothing of theirs was inherited. If you need\n"
+            "their output, find it before assuming it is missing; do not rebuild\n"
+            "it blindly.\n\n")
+    if absent_conflict:
+        lineage += (
+            f"NOT IN YOUR TREE: {', '.join(absent_conflict)} — their branches\n"
+            "CONFLICTED with this base and the merge was aborted. Reconcile them\n"
+            "by hand; do not assume their work is present.\n\n")
+    if parent_task_ids and not present:
+        lineage += (
+            f"This card was cut from {base}, not from any parent.\n\n")
+
+    return (
+        "[dispatch-target]\n"
+        f"repo: {DARKHELIX_REPO_PATH}\n"
+        f"worktree: {_dh_worktree(task_id)}\n"
+        f"branch: {_dh_branch(task_id)}\n"
+        f"base: {base}\n"
+        f"{chained}"
+        f"{_DT_NOTES_SEP}\n"
+        "Work in the worktree above. It is a real git worktree on its own\n"
+        f"branch off {base}, with database/, thirdParty/, testData/ and\n"
+        ".venv-dev/ symlinked in. Do NOT edit /ssdpool/DARKHELIX — on snarf\n"
+        "/home/sam/code/projects/DARKHELIX is the SAME checkout.\n\n"
+        f"{lineage}"
+        "[/dispatch-target]\n\n"
+    )
+
+
+def _isolation_failed_note(task_id: str, detail: str) -> str:
+    """Written when provisioning fails, so the card says so in the same place
+    a working card says the opposite.
+
+    The claim hook cannot veto a dispatch (kanban lifecycle hooks are
+    observers; return values are ignored), so this marker IS the stop: the
+    worker's skill refuses a card whose dispatch-target has no usable
+    worktree. Leaving the block off entirely would be indistinguishable from
+    a card nobody tried to provision."""
+    return (
+        "[dispatch-target]\n"
+        f"repo: {DARKHELIX_REPO_PATH}\n"
+        "worktree: NONE — ISOLATION FAILED\n"
+        f"error: {detail[:300]}\n"
+        f"{_DT_NOTES_SEP}\n"
+        "This card has NO isolated worktree. Do not work it: anything written\n"
+        "to the repo would land in the shared master checkout. Block it.\n"
+        "[/dispatch-target]\n\n"
+    )
+
+
+async def _darkhelix_worktree_exists(task_id: str) -> bool:
+    """Is the card's worktree actually on disk, right now?
+
+    The card body is a CLAIM about the world, not the world. A body can name
+    a worktree that has since been removed (cleaned up by hand, a rebuilt
+    box, a `git worktree prune`), and trusting the claim would hand a worker
+    a path that is not there -- which is how it ends up working in the shared
+    checkout instead. Verified, not assumed."""
+    wt = _dh_worktree(task_id)
+    try:
+        rc, _ = await _fleet_ssh("snarf", f"test -d {shlex.quote(wt)}/.git "
+                                          f"-o -f {shlex.quote(wt)}/.git")
+    except Exception:
+        return False
+    return rc == 0
+
+
+async def _darkhelix_provision(task_id: str,
+                               parent_task_ids: list[str] | None = None,
+                               body: str | None = None,
+                               dry_run: bool = False) -> dict:
+    """Give one card a worktree and a dispatch-target. Idempotent.
+
+    `parent_task_ids`/`body` let the create path pass what it already knows;
+    otherwise both are read from the board.
+
+    `dry_run` reports the decision -- in scope or not, parents, whether it is
+    already provisioned -- and creates nothing. The scope rule is a graph walk
+    over an LLM-generated dependency graph, so being able to ask "what would
+    you do with this card" without side effects is how it stays auditable
+    across the whole board."""
+    if not _TASK_ID_RE.match(task_id):
+        return {"ok": False, "error": "bad task id"}
+
+    detail: dict = {}
+    if body is None or parent_task_ids is None:
+        try:
+            detail = await _kanban_task_detail(task_id)
+        except Exception as exc:
+            return {"ok": False, "error": f"board unreadable: {exc}"}
+        if body is None:
+            body = (detail.get("task") or {}).get("body") or ""
+
+    if parent_task_ids is None:
+        in_scope, parents = await _darkhelix_lineage(task_id, detail)
+        if not in_scope:
+            return {"ok": True, "skipped": "not a DARKHELIX card",
+                    **({"dry_run": True, "would_provision": False} if dry_run else {})}
+        parent_task_ids = parents
+
+    # Already provisioned by the current mechanism -- and only the current
+    # one; the superseded `branch: wt/...` shape deliberately fails this.
+    # Both halves must hold: the body has to name the current worktree AND
+    # that worktree has to exist. Either alone is a card that lies.
+    current = _dispatch_target_is_current(body, task_id)
+    exists = await _darkhelix_worktree_exists(task_id)
+    if current and exists:
+        return {"ok": True, "already": True,
+                "worktree": _dh_worktree(task_id), "branch": _dh_branch(task_id)}
+
+    if dry_run:
+        return {"ok": True, "dry_run": True, "would_provision": True,
+                "parents": parent_task_ids,
+                "body_claims_current": current, "worktree_exists": exists,
+                "worktree": _dh_worktree(task_id), "branch": _dh_branch(task_id)}
+
+    wt = await _darkhelix_worktree_create(task_id, parent_task_ids)
+    isolated = bool(wt.get("ok"))
+    iso_out = wt.get("output") or ""
+
+    note = (_dispatch_target_note(task_id, wt, parent_task_ids) if isolated
+            else _isolation_failed_note(task_id, iso_out))
+    # Replace a stale block rather than stacking a second one on top of it:
+    # two dispatch-targets in one body is precisely the ambiguity that had a
+    # worker chasing a `wt/...` branch nothing had created.
+    stripped = _DISPATCH_TARGET_RE.sub("", body or "").lstrip("\n")
+    try:
+        await asyncio.to_thread(
+            _kanban_api_call, "PATCH",
+            f"/api/plugins/kanban/tasks/{quote(task_id)}",
+            json={"body": note + stripped})
+    except Exception as exc:
+        return {"ok": False, "isolated": isolated,
+                "error": f"worktree {'created' if isolated else 'failed'}; "
+                         f"card body not updated: {exc}"}
+
+    return {"ok": isolated, "isolated": isolated,
+            "worktree": _dh_worktree(task_id) if isolated else None,
+            "branch": _dh_branch(task_id) if isolated else None,
+            "base": wt.get("base") if isolated else None,
+            "merged": wt.get("merged") or [],
+            "unmerged": wt.get("unmerged") or [],
+            "missing": wt.get("missing") or [],
+            "parents": parent_task_ids,
+            "detail": iso_out[-400:]}
+
+
+@app.post("/api/kanban/provision")
+async def kanban_provision(request: Request) -> JSONResponse:
+    """Provision isolation for a card this server did not file.
+
+    Called by the `darkhelix-isolation` Hermes plugin from the
+    `kanban_task_claimed` hook on CT111 -- in the dispatcher process, after
+    the claim commits and before the worker subprocess spawns, so the worker
+    reads a body that already names its worktree.
+
+    Idempotent and safe to call on anything: a card outside DARKHELIX's
+    lineage is skipped, and a card already carrying a current dispatch-target
+    is a no-op."""
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    result = await _darkhelix_provision(
+        task_id, dry_run=bool(payload.get("dry_run")))
+    status = 200 if result.get("ok") else 502
+    if result.get("error") == "bad task id":
+        status = 400
+    return JSONResponse(result, status_code=status)
+
+
+async def _kanban_block(task_id: str, reason: str, kind: str = "needs_input") -> str:
+    """Put a card back on the board with the reason attached.
+
+    Returns what actually happened, because two different things can:
+
+      "blocked"   -- status is now blocked; it shows in the blocked lane.
+      "commented" -- the reason is on the card but the status did not move.
+                     `hermes kanban block` refuses some statuses (a card
+                     still in triage, or already blocked) yet files the
+                     reason as a comment regardless.
+      "failed"    -- neither; nothing reached the card.
+
+    Reporting a bare boolean here conflated "not blocked" with "the reason
+    was lost", and losing the reason is exactly the failure this whole path
+    exists to prevent."""
+    try:
+        await _kanban_ssh(
+            f"hermes kanban block --kind {shlex.quote(kind)} "
+            f"{shlex.quote(task_id)} {shlex.quote(reason[:900])}")
+    except Exception:
+        return "failed"
+    # Judge by the card's own state, not the command's exit code.
+    try:
+        detail = await _kanban_api_get(f"/api/plugins/kanban/tasks/{quote(task_id)}")
+    except Exception:
+        return "failed"
+    if (detail.get("task") or {}).get("status") == "blocked":
+        return "blocked"
+    marker = reason[:40]
+    for c in detail.get("comments") or []:
+        if marker and marker in (c.get("body") or ""):
+            return "commented"
+    return "failed"
+
+
+# ------------------------------------------------- DARKHELIX verification
+# Checking whether a card's work actually holds almost always means running
+# something on snarf: DARKHELIX lives at /ssdpool/DARKHELIX and no other box
+# in the fleet can see into it. Doing that with an agent costs a full model
+# run -- the coder card that blocked this board burned 2h04m and produced
+# nothing checkable before its model endpoint died. The repo's own suite is
+# 596 tests in ~44s with no model in the loop, so this exposes it directly
+# over the SSH connection pool /api/darkhelix-todo already uses.
+#
+# Checks are defined HERE, never read from a card. A card body is written by
+# an LLM -- the triage specifier rewrites title and body on promotion -- so
+# treating it as a source of shell commands would be a command-injection path
+# onto snarf as `sam`. The card may only name a check; this table decides
+# what that name runs.
+DARKHELIX_CHECKS: dict[str, dict[str, str]] = {
+    "tests": {
+        "label": "Test suite",
+        "cmd": ".venv-dev/bin/pytest tests/ -q",
+        "timeout": "900",
+    },
+    "imports": {
+        "label": "Package imports",
+        "cmd": ".venv-dev/bin/python -c 'import darkhelix; print(\"import ok\")'",
+        "timeout": "120",
+    },
+    "tree": {
+        "label": "Working tree + recent commits",
+        "cmd": "git status --short --branch && echo '--- recent ---' && git log --oneline -5",
+        "timeout": "60",
+    },
+}
+
+
+@app.get("/api/darkhelix/checks")
+async def darkhelix_check_list() -> JSONResponse:
+    """The checks the HUD is allowed to run, for the Verify control."""
+    return JSONResponse({"checks": [{"id": k, "label": v["label"]}
+                                    for k, v in DARKHELIX_CHECKS.items()]})
+
+
+@app.post("/api/darkhelix/verify")
+async def darkhelix_verify(request: Request) -> JSONResponse:
+    """Run one named check on snarf and return its exit code and output.
+
+    Optionally posts the verdict back as a comment on `task_id`, so the
+    result is durable on the card and a retrying worker can read why it
+    failed instead of rediscovering it."""
+    payload = await request.json()
+    check = (payload.get("check") or "").strip()
+    spec = DARKHELIX_CHECKS.get(check)
+    if spec is None:
+        return JSONResponse({"ok": False, "error": f"unknown check: {check!r}"},
+                            status_code=400)
+    cmd = (f"cd {shlex.quote(DARKHELIX_REPO_PATH)} && "
+           f"timeout {spec['timeout']} {spec['cmd']} 2>&1")
+    started = time.monotonic()
+    try:
+        rc, out = await _fleet_ssh("snarf", cmd)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    elapsed = round(time.monotonic() - started, 1)
+    result = {"ok": rc == 0, "rc": rc, "check": check, "label": spec["label"],
+              "elapsed": elapsed, "output": out[-8000:]}
+
+    task_id = (payload.get("task_id") or "").strip()
+    if task_id and payload.get("comment") and _TASK_ID_RE.match(task_id):
+        verdict = "PASSED" if rc == 0 else f"FAILED (exit {rc})"
+        tail = "\n".join(out.strip().splitlines()[-12:])
+        note = (f"Verification `{check}` {verdict} in {elapsed}s "
+                f"(run from the Looking Glass HUD on snarf).\n\n```\n{tail}\n```")
+        try:
+            await asyncio.to_thread(
+                _kanban_api_call, "POST",
+                f"/api/plugins/kanban/tasks/{quote(task_id)}/comments",
+                json={"author": "looking-glass", "body": note})
+            result["commented"] = True
+        except Exception as exc:
+            # The check itself succeeded or failed on its own merits; failing
+            # to file the note must not change that verdict.
+            result["comment_error"] = str(exc)
+    return JSONResponse(result)
+
+
+@app.post("/api/darkhelix/land")
+async def darkhelix_land(request: Request) -> JSONResponse:
+    """Take a card's finished worktree from "worker stopped" to "reviewable".
+
+        verify -> commit -> push -> PR
+
+    The branch is ALWAYS pushed, even when verification fails. Durability is
+    the thing that actually went wrong here: 552 lines sat uncommitted in a
+    shared checkout for five days because nothing ever pushed anything. A
+    branch is cheap and silent; losing work is not.
+
+    A pull request is opened only when verification PASSES. A card that
+    crashed halfway leaves a branch and no review noise -- the coder card
+    that ran 2h04m before its model endpoint died would otherwise have
+    opened a PR too.
+
+    Every failure reroutes the work back onto the board: the card is blocked
+    with the reason (which `hermes kanban block` also files as a comment), so
+    it reappears in the blocked lane with its cause attached instead of
+    failing silently off-screen."""
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    check = (payload.get("check") or "tests").strip()
+    spec = DARKHELIX_CHECKS.get(check)
+    if spec is None:
+        return JSONResponse({"ok": False, "error": f"unknown check: {check!r}"},
+                            status_code=400)
+    open_pr = bool(payload.get("pr", True))
+    branch, wt = _dh_branch(task_id), _dh_worktree(task_id)
+    steps: list[dict] = []
+
+    async def fail(stage: str, detail: str) -> JSONResponse:
+        reason = f"land failed at {stage}: {detail[:400]}"
+        rerouted = await _kanban_block(task_id, reason)
+        if not steps or steps[-1].get("stage") != stage:
+            steps.append({"stage": stage, "ok": False, "detail": detail[-1500:]})
+        return JSONResponse({"ok": False, "stage": stage, "steps": steps,
+                             "branch": branch, "rerouted_to_kanban": rerouted,
+                             "error": detail[-1500:]}, status_code=200)
+
+    async def run(stage: str, cmd: str, allow_fail: bool = False):
+        """Run one stage in the card's worktree. ALWAYS records a step --
+        an exception is a stage outcome too, and callers read steps[-1]."""
+        try:
+            rc, out = await _fleet_ssh("snarf", f"cd {shlex.quote(wt)} && {cmd} 2>&1")
+        except Exception as exc:
+            steps.append({"stage": stage, "ok": False, "rc": None, "detail": str(exc)})
+            return False, str(exc)
+        steps.append({"stage": stage, "ok": rc == 0 or allow_fail,
+                      "rc": rc, "detail": out[-1500:]})
+        return (rc == 0 or allow_fail), out
+
+    try:
+        _, present = await _fleet_ssh(
+            "snarf", f"test -d {shlex.quote(wt)} && echo yes || echo no")
+    except Exception as exc:
+        return await fail("worktree", str(exc))
+    if present.strip() != "yes":
+        return await fail("worktree",
+                          f"no worktree at {wt} — was this card filed before "
+                          "isolation existed?")
+
+    # 1. verify (does not gate the push, only the PR)
+    ok_verify, verify_out = await run(
+        "verify", f"timeout {spec['timeout']} {spec['cmd']}", allow_fail=True)
+    verify_passed = steps[-1].get("rc") == 0
+
+    # 2. commit whatever the worker left behind. This is what makes the work
+    #    durable -- it is in git, on its own branch, the moment this succeeds.
+    #    Pushing is visibility and offsite backup, not durability.
+    ok, out = await run(
+        "commit",
+        "git add -A && (git diff --cached --quiet && echo 'nothing to commit' || "
+        f"git commit -q -m {shlex.quote(f'{task_id}: work from the Looking Glass kanban')})")
+    if not ok:
+        return await fail("commit", out)
+
+    result = {"ok": True, "branch": branch, "worktree": wt,
+              "verify_passed": verify_passed, "steps": steps, "pr_url": None}
+
+    # 3. A failed check stops here, BEFORE the push. DARKHELIX has a pre-push
+    #    hook that runs the suite and refuses a broken push -- attempting it
+    #    anyway would just run the same ~40s suite a second time to be told
+    #    no. The commit above already holds the work; the card goes back to
+    #    the board carrying the reason.
+    if not verify_passed:
+        reason = (f"verification `{check}` failed, so nothing was pushed and no PR "
+                  f"was opened. The work is committed locally on {branch} in "
+                  f"{wt}.\n\n{verify_out[-500:]}")
+        result["ok"] = False
+        result["stage"] = "verify"
+        result["pushed"] = False
+        result["pr_skipped"] = "verification failed"
+        result["rerouted_to_kanban"] = await _kanban_block(task_id, reason)
+        return JSONResponse(result)
+
+    # 4. push -- the hook re-runs the suite here and should agree with step 1
+    ok, out = await run("push", f"git push -u origin {shlex.quote(branch)}")
+    if not ok:
+        return await fail("push", out)
+    result["pushed"] = True
+
+    if not open_pr:
+        result["pr_skipped"] = "pr not requested"
+        return JSONResponse(result)
+
+    title = f"[hermes] {task_id}: kanban work"
+    body = (f"Filed from the Looking Glass HUD for kanban card `{task_id}`.\n\n"
+            f"Verification `{check}` passed before this PR was opened.\n\n"
+            f"```\n{chr(10).join(verify_out.strip().splitlines()[-12:])}\n```")
+    ok, out = await run(
+        "pr",
+        f"gh pr create --base {shlex.quote(DARKHELIX_BASE_BRANCH)} "
+        f"--head {shlex.quote(branch)} --title {shlex.quote(title)} "
+        f"--body {shlex.quote(body)}")
+    if not ok:
+        # The work is pushed and safe; only the PR step failed.
+        return await fail("pr", out)
+    url = next((ln.strip() for ln in out.splitlines()
+                if ln.strip().startswith("https://")), None)
+    result["pr_url"] = url
+    return JSONResponse(result)
+
+
+def _submission_key(title: str, body: str) -> str:
+    """The dedup identity of a submission: a hash of what was submitted.
+
+    TODO.md item ids are positional (`todo-3` means "the 4th unchecked box in
+    THIS parse"), so they identify nothing across an edit of the file. The
+    content does.
+
+    Filing (`/api/kanban/create`) and lookup (`/api/darkhelix-todo`) must
+    derive this identically or the "already filed" badge silently stops
+    matching, so both call here rather than each hashing for themselves."""
+    return "lg-" + hashlib.sha256(f"{title}\n{body}".encode("utf-8")).hexdigest()[:32]
+
+
+async def _submitted_keys() -> dict[str, dict]:
+    """{submission key -> {id, status}} for every card on the board.
+
+    Archived cards are included on purpose: an item whose card was filed,
+    finished and archived is still an item you should not be filing again.
+    Only cards created after the key was introduced carry one, so anything
+    filed before that stays unmatched -- absence here means "no evidence",
+    never "definitely not filed"."""
+    board = await _kanban_api_get(
+        "/api/plugins/kanban/board?include_archived=true")
+    keys: dict[str, dict] = {}
+    for column in board.get("columns") or []:
+        for task in column.get("tasks") or []:
+            key = task.get("idempotency_key")
+            if key:
+                keys[key] = {"id": task.get("id"), "status": task.get("status")}
+    return keys
 
 
 @app.get("/api/darkhelix-todo")
@@ -2345,14 +3370,145 @@ async def darkhelix_todo() -> JSONResponse:
     """Real, current TODO.md items from DARKHELIX (snarf), for the SUBMIT
     WORK panel's picker. Read live every request, no caching -- Sam edits
     this file directly and it's the single tracker ("if it isn't here, it
-    isn't tracked")."""
+    isn't tracked").
+
+    Each item is annotated with `filed_as` when a card for it already exists,
+    because TODO.md and the board are separate trackers that nothing keeps in
+    step: filing a card never ticks the box, and landing the work never ticks
+    it either. That is how an item whose fix is already sitting in a merged
+    or open PR stays sitting in this picker looking like open work."""
     try:
         rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(DARKHELIX_TODO_PATH)}")
     except Exception as exc:
         return JSONResponse({"items": [], "error": str(exc)}, status_code=502)
     if rc != 0:
         return JSONResponse({"items": [], "error": f"cat exited {rc}"}, status_code=502)
-    return JSONResponse({"items": _parse_darkhelix_todo(out)})
+    items = _parse_darkhelix_todo(out)
+
+    # A board that can't be read costs the badges, not the picker.
+    board_error = None
+    try:
+        filed = await _submitted_keys()
+    except Exception as exc:
+        filed, board_error = {}, str(exc)
+    for item in items:
+        # Matches a submission made with no extra instructions, which is how
+        # the picker files by default. Adding notes makes a different card on
+        # purpose -- different instructions are a different request.
+        item["filed_as"] = filed.get(_submission_key(item["title"], item["text"]))
+
+    return JSONResponse({"items": items, "board_error": board_error})
+
+
+# ------------------------------------------- TODO.md <- board write-back
+# TODO.md and the kanban board were separate trackers with nothing flowing
+# between them. Filing a card never ticked the box and landing the work never
+# ticked it either, so an item whose fix was already merged went on looking
+# like open work forever -- and the picker cheerfully offered to file it
+# again. The "filed" badge was a read-only patch over that: it told you the
+# state, in the HUD, until you closed the tab. Nothing reached the file.
+#
+# This writes the board's state back into TODO.md, in the file's own
+# vocabulary (the conventions its header already documents, and that
+# _parse_darkhelix_todo already reads):
+#
+#   card done             ->  - [x], and any **WIP** tag dropped
+#   card running/ready/review -> - [ ] **WIP** (tag added if absent)
+#
+# What it will NOT do, on purpose:
+#   * untick anything. Only ever ' ' -> 'x', never the reverse: the box is
+#     Sam's to tick and a board hiccup must not erase a completion.
+#   * touch an item already carrying **WIP** or **WAITING**. WAITING is a
+#     human judgement about a missing database or binary; the board does not
+#     get to overrule it.
+#   * treat `archived` as done. Archive is reachable from any status, so it
+#     is evidence a card was closed, not evidence the work happened.
+_TODO_WIP_STATUSES = ("running", "ready", "review")
+
+
+def _todo_apply_board_state(text: str, items: list[dict],
+                            filed: dict[str, dict]) -> tuple[str, list[dict]]:
+    """Return (new_text, changes) with each item's line rewritten in place."""
+    lines = text.splitlines(keepends=True)
+    changes: list[dict] = []
+    for item in items:
+        card = filed.get(_submission_key(item["title"], item["text"]))
+        if not card:
+            continue
+        idx = item.get("line")
+        if idx is None or idx >= len(lines):
+            continue
+        raw = lines[idx]
+        eol = raw[len(raw.rstrip("\r\n")):]
+        line = raw.rstrip("\r\n")
+        m = _TODO_ITEM_RE.match(line)
+        if not m:
+            continue
+        rest = m.group(2)
+        status = card.get("status")
+        if status == "done":
+            # Drop the status tag as part of ticking: a **WIP** box that is
+            # also checked contradicts itself.
+            new_line = "- [x] " + _TODO_STATUS_TAG_RE.sub("", rest)
+            kind = "completed"
+        elif status in _TODO_WIP_STATUSES and not _TODO_STATUS_TAG_RE.match(rest):
+            new_line = "- [ ] **WIP** " + rest
+            kind = "marked WIP"
+        else:
+            continue
+        if new_line == line:
+            continue
+        lines[idx] = new_line + (eol or "\n")
+        changes.append({"title": item["title"][:120], "card": card.get("id"),
+                        "status": status, "change": kind})
+    return "".join(lines), changes
+
+
+@app.post("/api/darkhelix-todo/sync")
+async def darkhelix_todo_sync() -> JSONResponse:
+    """Push the board's state back into TODO.md on snarf.
+
+    Compare-and-swap, not a blind write: the replacement only lands if the
+    file on snarf still hashes to what was just read. TODO.md is edited by
+    hand as the single tracker, and clobbering an edit made in the seconds
+    this took would be a far worse bug than the staleness being fixed. A
+    `.bak` is kept alongside regardless."""
+    try:
+        rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(DARKHELIX_TODO_PATH)}")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": f"cat exited {rc}"}, status_code=502)
+    try:
+        filed = await _submitted_keys()
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"board unreadable: {exc}"},
+                            status_code=502)
+
+    items = _parse_darkhelix_todo(out)
+    new_text, changes = _todo_apply_board_state(out, items, filed)
+    if not changes:
+        return JSONResponse({"ok": True, "changes": [], "written": False})
+
+    before = hashlib.sha256(out.encode("utf-8")).hexdigest()
+    payload = base64.b64encode(new_text.encode("utf-8")).decode("ascii")
+    path = shlex.quote(DARKHELIX_TODO_PATH)
+    cmd = (
+        f"set -e; cd \"$(dirname {path})\"; "
+        f"test \"$(sha256sum {path} | cut -d' ' -f1)\" = {shlex.quote(before)} "
+        f"|| {{ echo 'TODO.md changed on disk since it was read'; exit 3; }}; "
+        f"printf '%s' {shlex.quote(payload)} | base64 -d > {path}.lg-new; "
+        f"cp -p {path} {path}.bak; mv {path}.lg-new {path}"
+    )
+    try:
+        rc, out2 = await _fleet_ssh("snarf", cmd + " 2>&1")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc), "changes": changes},
+                            status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": out2.strip()[-500:] or f"exit {rc}",
+                             "changes": changes}, status_code=409 if rc == 3 else 502)
+    return JSONResponse({"ok": True, "changes": changes, "written": True})
 
 
 def _slugify(text: str, max_len: int = 40) -> str:
@@ -2387,20 +3543,38 @@ async def kanban_create(request: Request) -> JSONResponse:
     if not title:
         return JSONResponse({"ok": False, "error": "title is required"}, status_code=400)
     body = payload.get("body") or ""
-    branch = f"wt/{_slugify(title)}-{int(time.time())}"
-    dispatch_target = (
-        "[dispatch-target]\n"
-        f"repo: {DARKHELIX_REPO_PATH}\n"
-        f"branch: {branch}\n"
-        "[/dispatch-target]\n\n"
-    )
-    body = dispatch_target + body
+    # "Builds on": the card this one continues. Two things follow from it,
+    # and both are needed -- one without the other is still broken.
+    #   --parent    makes the board hold this card in `todo` until the parent
+    #               closes, so they run in order instead of racing.
+    #   base branch makes the child's worktree start FROM the parent's result
+    #               instead of from origin/master.
+    # Ordering alone was never the problem; a card that runs second but sees
+    # none of the first card's changes still rebuilds the same work.
+    parent_task_id = (payload.get("parent_task_id") or "").strip()
+    if parent_task_id and not _TASK_ID_RE.match(parent_task_id):
+        return JSONResponse({"ok": False, "error": "bad parent task id"}, status_code=400)
+    # Dedup key, derived from what was actually submitted. TODO.md item ids
+    # are positional (`todo-3` means "the 4th unchecked box in this parse"),
+    # so they identify nothing across an edit of the file -- the content
+    # does. `hermes kanban create --idempotency-key` returns the EXISTING
+    # non-archived card's id instead of creating a second one, which is what
+    # stops the same item being filed twice with nothing noticing.
+    #
+    # Hash the body as RECEIVED, before the dispatch-target header below is
+    # prepended: that header carries a timestamped branch name, so hashing
+    # after it would make every key unique and quietly defeat the dedup.
+    idempotency_key = _submission_key(title, body)
+    # The dispatch-target block is filled in AFTER creation: the branch and
+    # worktree are named from the task id, which does not exist yet.
     cmd = (
         "hermes kanban create "
         f"{shlex.quote(title[:200])} "
         f"--body {shlex.quote(body)} "
         "--workspace scratch "
-        "--triage --created-by looking-glass --json"
+        f"--idempotency-key {shlex.quote(idempotency_key)} "
+        + (f"--parent {shlex.quote(parent_task_id)} " if parent_task_id else "")
+        + "--triage --created-by looking-glass --json"
     )
     try:
         rc, out = await _kanban_ssh(cmd)
@@ -2414,7 +3588,38 @@ async def kanban_create(request: Request) -> JSONResponse:
         return JSONResponse(
             {"ok": False, "error": f"unparseable output: {out[-500:]}"}, status_code=502
         )
-    return JSONResponse({"ok": True, "task": data})
+    # On a dedup hit the CLI prints the pre-existing card rather than a new
+    # one, and says nothing about which happened. Its age is the tell: a card
+    # this request created is seconds old.
+    created_at = data.get("created_at")
+    duplicate = False
+    try:
+        if created_at is not None:
+            duplicate = (time.time() - float(created_at)) > 10
+    except (TypeError, ValueError):
+        duplicate = False
+
+    # Isolation, created here rather than asked for in the card text -- via
+    # the same _darkhelix_provision() the claim-time hook uses, so a card
+    # filed here and a card decomposed out of it are provisioned by one
+    # implementation that cannot drift from itself.
+    task_id = str(data.get("id") or data.get("task_id") or "")
+    prov: dict = {"ok": False, "error": "no task id returned"}
+    if _TASK_ID_RE.match(task_id):
+        prov = await _darkhelix_provision(
+            task_id,
+            parent_task_ids=[parent_task_id] if parent_task_id else [],
+            body=body,
+        )
+
+    return JSONResponse({"ok": True, "task": data, "duplicate": duplicate,
+                         "idempotency_key": idempotency_key,
+                         "isolated": bool(prov.get("isolated")),
+                         "worktree": prov.get("worktree"),
+                         "branch": prov.get("branch"),
+                         "parent": parent_task_id or None,
+                         "base": prov.get("base"),
+                         "isolation_detail": prov.get("detail") or prov.get("error") or ""})
 
 
 @app.get("/api/kanban/{task_id}/log")
@@ -2429,6 +3634,30 @@ async def kanban_log(task_id: str, request: Request) -> JSONResponse:
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
     return JSONResponse({"id": task_id, "log": out[-60000:]})
+
+
+@app.get("/api/kanban/{task_id}")
+async def kanban_task(task_id: str) -> JSONResponse:
+    """One card, with its comments, runs, links and recent events.
+
+    The task-log pane used to poll the WHOLE board every 3s just to read one
+    card's status, because the ssh CLI had no per-task read. The plugin API
+    does, so this is a single card's worth of traffic instead of the board's.
+    No ssh fallback: the caller already has the board's copy of the card to
+    fall back on, and a degraded detail view is better than a slow one."""
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"error": "bad task id"}, status_code=400)
+    try:
+        detail = await _kanban_api_get(f"/api/plugins/kanban/tasks/{quote(task_id)}")
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=502)
+    return JSONResponse({
+        "task": _kanban_task_slim(detail.get("task") or {}),
+        "comments": detail.get("comments") or [],
+        "runs": detail.get("runs") or [],
+        "links": detail.get("links") or [],
+        "events": (detail.get("events") or [])[-40:],
+    })
 
 
 @app.get("/api/conversation")
@@ -2536,6 +3765,13 @@ async def _probe_network_topology() -> None:
     claude_edges = [
         {"from": "claude", **e} for e in (cfg.get("claude_edges") or []) if e.get("to") in node_ids
     ]
+    # The shared mempalace lives on claude-control; these say who else reads it.
+    # A connector rather than a use-hull on the flat map (see memory_edges in
+    # server.yaml) so the map keeps three regions instead of four.
+    memory_edges = [
+        {"from": "claude-control", **e}
+        for e in (cfg.get("memory_edges") or []) if e.get("to") in node_ids
+    ]
 
     NETWORK_TOPOLOGY_STATE.update({
         "updated": time.time(),
@@ -2543,6 +3779,7 @@ async def _probe_network_topology() -> None:
         "edges": {
             "physical": physical_edges, "general": general_edges,
             "hermes": hermes_edges, "claude": claude_edges,
+            "memory": memory_edges,
         },
     })
 

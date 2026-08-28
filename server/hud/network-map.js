@@ -392,11 +392,13 @@ window.setSceneryPaused=function(paused){
 };
 
 function applyData(){
+  // The NETWORK is now drawn flat, in SVG, by network-flat.js. The 3D graph
+  // keeps running purely as the LANDSCAPE (permanent scenery), so it is fed
+  // an empty node/link set forever rather than being torn down -- destroying
+  // it would take the background with it.
+  if(typeof flatNetworkSetData==="function") flatNetworkSetData(latestTopology);
   if(!graph) return;
-  // Must respect the current view: the 15s topology poll calls this
-  // unconditionally, which previously repopulated the graph moments after a
-  // view change had deliberately cleared it, making hidden nodes reappear.
-  graph.graphData(netmapActive ? buildGraphData() : {nodes:[],links:[]});
+  graph.graphData({nodes:[],links:[]});
   refreshAccessors();
 }
 
@@ -749,16 +751,11 @@ function setNetworkVisible(on){
   $("netmapControls").style.display = on ? "flex" : "none";
   document.body.classList.toggle("netmap-on", on);
   if(!on) showNodeInfo(null);
+  if(typeof flatNetworkSetVisible==="function") flatNetworkSetVisible(on);
+  if(on && typeof flatNetworkSetData==="function") flatNetworkSetData(latestTopology);
   if(!graph) return;
-  if(on){
-    autoFramed=false; zoomBaseDist=null;
-    applyData();
-  }else{
-    // Empty the graph but keep the scene (and therefore the landscape)
-    // running. Node objects are cached on the node records, so re-showing
-    // restores their existing positions rather than re-randomising them.
-    graph.graphData({nodes:[],links:[]});
-  }
+  // Landscape only -- the network itself is the SVG layer now.
+  graph.graphData({nodes:[],links:[]});
 }
 
 /* Swing the 3D camera in step with a HUD view change, so the background

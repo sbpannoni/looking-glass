@@ -569,9 +569,18 @@ async function loadConversationHistory(){
   feed.scrollTop=feed.scrollHeight;
 }
 
+/* Borrowing the live #feed into a pane has to be perfectly reversible: it is
+   the only tab that mutates DOM outside its own panel, so a half-restore
+   leaves wreckage on every other view. Closing used to drop "in-pane" but
+   keep "open" — the class the DOCK toggle owns — so the transcript came back
+   as a permanently-expanded 36vh block in #center: it lay over the network
+   map, and it ate half of #center's height so every view opened afterwards
+   rendered at half height. Restore the docked state that was there before,
+   and put the feed back even if the anchor has been lost. */
 function openHermesChatPane(){
   openWorkTabTurning("hermes","live","HERMES (live)",(panel,tab)=>{
     const feed=$("feed");
+    const wasDockedOpen=feed.classList.contains("open");
     const anchor=document.createComment("feed-home");
     feed.parentNode.insertBefore(anchor,feed);
     panel.classList.add("hermes-pane");
@@ -580,7 +589,15 @@ function openHermesChatPane(){
     loadConversationHistory();
     tab.onBeforeClose=()=>{
       feed.classList.remove("in-pane");
-      anchor.parentNode.insertBefore(feed,anchor);
+      // The dock toggle is the only thing allowed to own "open" once the feed
+      // is docked again, so hand it back exactly as it was found.
+      feed.classList.toggle("open", wasDockedOpen);
+      // Fall back to the dock's own slot rather than leaving the feed inside
+      // a panel that is about to be removed from the document.
+      const home=anchor.parentNode
+        ? {parent:anchor.parentNode, before:anchor}
+        : {parent:$("center"), before:$("hermesDock")};
+      home.parent.insertBefore(feed, home.before);
       anchor.remove();
     };
   });

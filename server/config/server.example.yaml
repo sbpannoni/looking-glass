@@ -90,6 +90,15 @@ persona:                     # used only by the anthropic fallback path
     You are the spoken interface for the user's personal agent. Be direct,
     calm, and concise. Default to one to three short sentences.
 
+kanban:                      # AGENT WORK board (/api/kanban)
+  host: hermes               # ssh fallback target, a TERMINAL_HOSTS key
+  # Hermes dashboard base URL. Its kanban plugin serves the board at
+  # /api/plugins/kanban -- one HTTP call per poll instead of an ssh CLI exec,
+  # plus ordered columns and a per-task endpoint the CLI cannot provide.
+  # Leave empty to use the ssh path only. Credentials come from the
+  # environment: HERMES_DASHBOARD_USER / HERMES_DASHBOARD_PASSWORD.
+  dashboard_url: http://hermes.example.lan:9119
+
 activity_feed:               # Hermes session + rack-host reachability feed (/api/activity)
   poll_seconds: 30
   hosts:

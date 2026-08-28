@@ -67,14 +67,11 @@
         <button class="btn danger" id="stopBtn">■ STOP</button>
       </div>
     </div>
-    <div class="panel"><h2><span>AGENT ACTIVITY</span><span class="num">02</span></h2>
-      <div id="activity"><div>— no activity yet —</div></div>
+    <div class="panel accent-magenta"><h2><span>GPU · SNARF</span><span class="num">02</span></h2>
+      <div id="gpuBars" class="gpu-rack"><div class="gpu-offline">— loading —</div></div>
     </div>
-    <div class="panel collapsible collapsed"><h2><span>TURN METRICS</span><span class="num">03</span></h2>
-      <div class="kv"><span>Turns</span><b id="mTurns">0</b></div>
-      <div class="kv"><span>Last: speech→audio</span><b id="mFirst">—</b></div>
-      <div class="kv"><span>Last: total</span><b id="mTotal">—</b></div>
-      <div class="kv"><span>Brain</span><b id="mBrain">—</b></div>
+    <div class="panel"><h2><span>AGENT ACTIVITY</span><span class="num">03</span></h2>
+      <div id="activity"><div>— no activity yet —</div></div>
     </div>
     <div class="panel"><h2><span>VIEWS</span><span class="num">04</span></h2>
       <button class="btn viewBtn" data-action="kanban" style="border-color:var(--amber); color:var(--amber)">▤ AGENT WORK (KANBAN)</button>
@@ -96,6 +93,10 @@
       <div class="kv"><span>Memory scope</span><b>looking-glass:user:main</b></div>
       <div class="kv"><span>Active sessions</span><b id="hSessions">—</b></div>
       <div class="kv"><span>Running agents</span><b id="hAgents">—</b></div>
+      <div class="kv"><span>Turns</span><b id="mTurns">0</b></div>
+      <div class="kv"><span>Last: speech→audio</span><b id="mFirst">—</b></div>
+      <div class="kv"><span>Last: total</span><b id="mTotal">—</b></div>
+      <div class="kv"><span>Brain</span><b id="mBrain">—</b></div>
     </div>
     <div class="panel"><h2><span>SKILLS</span><span class="num">06</span></h2>
       <div class="kv"><span>Loaded skills</span><b id="skillCount">—</b></div>
@@ -189,6 +190,8 @@
 <script src="coder-models.js"></script>
 <script src="coder-transit-map.js"></script>
 <script src="submit-work.js"></script>
+<script src="gpu-panel.js"></script>
+<script src="network-flat.js"></script>
 <script src="network-map.js"></script>
 </body>
 </html>
