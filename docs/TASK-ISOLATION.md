@@ -163,6 +163,63 @@ also treats as "stop and block". So both failure modes stop the card rather
 than letting it edit the shared checkout. That is why a conservative scope
 rule is safe: out-of-scope fails loudly, not silently.
 
+## Dispatch: why it is a tool, not a skill
+
+Isolation gets a card a worktree. Running the work is the next layer, and it
+had the same shape of bug for a different reason.
+
+`execution-engine-dispatch` used to describe a four-step procedure — build a
+command, run it, parse `result.json`, report to kanban — with **zero
+judgement calls in it**. Every branch is `if result["status"] == "done"`.
+Handing that to a model gave it wide latitude and a trivial mandate, and it
+filled the gap: runs 1 and 2 (2026-08-22) exited without ever calling
+`kanban_complete` ("protocol violation"), and runs 4 and 6 (2026-08-28) both
+reasoned their way to editing files directly instead of dispatching. Prose in
+a skill is a suggestion.
+
+So the procedure moved into a tool, `dispatch_to_engine`, registered by the
+`darkhelix-engine` plugin on CT111. Everything that used to be a written
+warning is now unreachable rather than discouraged:
+
+| trap | how the tool removes it |
+|---|---|
+| passing `repo:` instead of `worktree:` — the engine cuts its branch from `--repo-path`'s HEAD, so this silently discards the parents' work | reads `worktree:` from the dispatch-target |
+| reusing the card's branch — `git worktree add -b` fails on an existing branch | mints `hermes/<task_id>-engine-<n>` |
+| omitting `--description` (required) or passing `--workspace-path` (never existed) | builds the argv |
+| running a mode-644 file directly | invokes via `python3` |
+| forgetting `kanban_complete` | attaches the patch and completes on success |
+
+**What is deliberately NOT in the tool: diagnosis.** On failure it returns the
+engine's verdict and stops — it does not block the card and does not retry.
+Deciding whether a red test gate means "the edit was wrong" or "the spec was
+incomplete" is the one genuinely reasoned call in the flow, and it is the
+model's. That is not academic: the 2026-08-28 08:20 attempt failed its gate
+because the card never mentioned `tests/test_synthetic_pcr_panel.py`, which
+asserts the old behaviour — correcting the data made a strict-xfail test start
+passing, which registers as a failure. The edit was fine; the spec was short.
+Re-running it unchanged would fail identically forever.
+
+Attempts are capped at 3, counted from attempt directories on disk rather than
+from anything the model tracks.
+
+`dry_run: true` reports the exact command and inputs without spending an
+attempt.
+
+## Card bodies are not authoritative about branches
+
+The decomposer writes child bodies with an LLM, copying machinery out of the
+parent it was handed. That is how `wt/the-synthetic-pcr-gene-panel-is-
+fabricat-1787435482` — a branch name from the first, superseded create path,
+which nothing ever created — became an instruction in four child bodies and
+then the engine's real `--branch-name`. The run failed and deleted the branch,
+so the work was lost.
+
+Provisioning now defuses that one provably-dead shape (`wt/<slug>-<10-digit
+epoch>`) when it rewrites the body. Deliberately narrow: a broader
+"strip anything branch-shaped" rule would start editing real task text, which
+is a worse failure than the one it prevents. Branches and paths are
+provisioning's to decide; the card text only ever describes the work.
+
 ## Operating it
 
 - **Audit the whole board without side effects:**

@@ -2883,6 +2883,31 @@ async def _darkhelix_lineage(task_id: str, detail: dict) -> tuple[bool, list[str
     return False, parents
 
 
+# The decomposer writes card bodies with an LLM, and it copies machinery out
+# of the parent it was given. That is how `wt/the-synthetic-pcr-gene-panel-is-
+# fabricat-1787435482` -- a branch name from the first, superseded HUD create
+# path, which nothing ever created -- ended up as an instruction in four child
+# bodies, and then as the engine's actual `--branch-name` on 2026-08-28. The
+# run failed and deleted the branch, so the work was lost.
+#
+# Branches and paths are provisioning's to decide, never the card text's. This
+# neutralises that one provably-dead shape and nothing else: `wt/<slug>-<10-
+# digit epoch>` is the exact convention the old path emitted, no live
+# mechanism produces it, and a real sentence is not going to contain one. A
+# broader "strip anything branch-shaped" rule would start editing Sam's own
+# task text, which is a worse failure than the one it prevents.
+_DEAD_WT_BRANCH_RE = re.compile(r"\bwt/[a-z0-9][a-z0-9-]*-\d{10}\b")
+
+
+def _sanitize_card_body(body: str, task_id: str) -> tuple[str, int]:
+    """Return (body, count) with dead branch instructions defused."""
+    replacement = (f"(REMOVED: a dead branch name was here. The branch for this "
+                   f"card is {_dh_branch(task_id)}, named in the dispatch-target "
+                   f"above -- use that and nothing else.)")
+    new_body, n = _DEAD_WT_BRANCH_RE.subn(replacement, body or "")
+    return new_body, n
+
+
 def _dispatch_target_note(task_id: str, wt: dict,
                           parent_task_ids: list[str]) -> str:
     """The block the worker reads.
@@ -3046,6 +3071,7 @@ async def _darkhelix_provision(task_id: str,
     # two dispatch-targets in one body is precisely the ambiguity that had a
     # worker chasing a `wt/...` branch nothing had created.
     stripped = _DISPATCH_TARGET_RE.sub("", body or "").lstrip("\n")
+    stripped, defused = _sanitize_card_body(stripped, task_id)
     try:
         await asyncio.to_thread(
             _kanban_api_call, "PATCH",
@@ -3057,6 +3083,7 @@ async def _darkhelix_provision(task_id: str,
                          f"card body not updated: {exc}"}
 
     return {"ok": isolated, "isolated": isolated,
+            "dead_branch_refs_defused": defused,
             "worktree": _dh_worktree(task_id) if isolated else None,
             "branch": _dh_branch(task_id) if isolated else None,
             "base": wt.get("base") if isolated else None,
