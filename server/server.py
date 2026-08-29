@@ -2768,11 +2768,29 @@ async def _darkhelix_worktree_create(
     # absolute snarf paths into the repo. `info/exclude` lives in the common
     # git dir, so writing it once covers every worktree, and it is local: it
     # is never committed and never shows in a diff. Idempotent via grep.
-    excludes = "; ".join(
+    # A shared dir is excluded ONLY where it is actually a symlink here.
+    #
+    # testData is a TRACKED directory in this repo (7 tracked files), so the
+    # `[ -e ]` guard above never symlinks it -- and excluding it anyway made
+    # every NEW file under testData/ silently unaddable. That is precisely
+    # where a worker puts a test fixture: t_610790d9's first engine attempt
+    # created its tests there, `git add -A` skipped them, and the attempt
+    # failed having committed nothing (2026-08-28).
+    #
+    # `[ -L ]` is the honest condition: the exclusion exists to stop a SYMLINK
+    # being committed, so it should apply to exactly the names that are one.
+    # The agent artefacts are unconditional -- they are never legitimate.
+    link_excludes = "; ".join(
+        f"([ -L {shlex.quote(d)} ] && {{ grep -qxF {shlex.quote(d)} \"$GITCOMMON/info/exclude\" 2>/dev/null || "
+        f"echo {shlex.quote(d)} >> \"$GITCOMMON/info/exclude\"; }} || true)"
+        for d in DARKHELIX_SHARED
+    )
+    artifact_excludes = "; ".join(
         f"grep -qxF {shlex.quote(d)} \"$GITCOMMON/info/exclude\" 2>/dev/null || "
         f"echo {shlex.quote(d)} >> \"$GITCOMMON/info/exclude\""
-        for d in DARKHELIX_SHARED + DARKHELIX_AGENT_ARTIFACTS
+        for d in DARKHELIX_AGENT_ARTIFACTS
     )
+    excludes = f"{link_excludes}; {artifact_excludes}"
     default_base = f"origin/{DARKHELIX_BASE_BRANCH}"
     # Resolve the base on snarf, not here: only the repo knows which parent
     # branches exist. It echoes the outcome back on BASE=/MERGED=/UNMERGED=

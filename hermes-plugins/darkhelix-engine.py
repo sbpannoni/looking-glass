@@ -252,6 +252,29 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
             attached = f"scp failed: {scp.stderr[-300:]}"
 
     patch_ok = bool(attached) and not str(attached).startswith(("scp failed", "attach failed"))
+    # Advance the CARD's own branch to the work the engine just committed.
+    #
+    # Without this the card branch stays empty and the work lives only on
+    # hermes/<task>-engine-<n>. Provisioning chains a child off its PARENT'S
+    # CARD BRANCH, so every child was cut from an empty branch and inherited
+    # nothing -- the exact "each task spawns without the previous task's
+    # changes" problem the worktree chaining was built to solve, reappearing
+    # one level down.
+    #
+    # It is not cosmetic. On 2026-08-28 t_9df9cb50 removed a workaround in
+    # coord_liftover.py that only becomes safe once its parent's
+    # gene_prediction.py fix is present -- and gated its tests against a tree
+    # where that fix was absent. The suite passed, proving the change works
+    # against the OLD behaviour, which is precisely backwards.
+    #
+    # --ff-only on purpose: the engine cut its branch from this branch's HEAD,
+    # so a fast-forward is the only correct outcome. If it is not a
+    # fast-forward something moved underneath us and the right answer is to
+    # say so, not to merge.
+    ff = _ssh(f"cd {shlex.quote(worktree)} && "
+              f"git merge --ff-only {shlex.quote(branch)} 2>&1", timeout=120)
+    card_branch_advanced = ff.returncode == 0
+
     summary = (f"engine attempt {n} passed its test gate on {branch}; "
                f"patch {'attached' if patch_ok else 'NOT attached'}")
     comp = subprocess.run([HERMES, "kanban", "complete", task_id, "--summary", summary],
@@ -263,6 +286,8 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
         "branch": branch,
         "patch": attached,
         "patch_attached": patch_ok,
+        "card_branch_advanced": card_branch_advanced,
+        "card_branch_error": None if card_branch_advanced else (ff.stdout or ff.stderr or "")[-300:],
         "card_completed": comp.returncode == 0,
         "complete_error": None if comp.returncode == 0 else comp.stderr[-300:],
         "next": ("Nothing further. The card is complete and the branch holds a "
