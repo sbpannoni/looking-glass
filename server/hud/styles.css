@@ -605,6 +605,12 @@ footer{
 .kb-who{overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 .kb-meta-r{display:flex; align-items:center; gap:5px; flex-shrink:0}
 .kb-chip{border:1px solid var(--line); border-radius:8px; padding:0 5px; font-size:9.5px}
+/* Dependency state. `waiting` is the one that changes what you can do about
+   the card, so it is the only one that gets colour. */
+.kb-chip.kb-dep{color:var(--txt-dim)}
+.kb-chip.kb-dep.waiting{color:var(--amber); border-color:#7a5a1a}
+.kb-chip.kb-kids{color:var(--txt-dim); font-variant-numeric:tabular-nums}
+.kb-chip.kb-kids.ok{color:var(--green, #4ade80); border-color:#2f6b43}
 .kb-age{color:var(--txt-dim); font-size:10px; font-variant-numeric:tabular-nums}
 /* `button.btn` is element+class, so a single-class rule here loses the
    cascade and the card buttons kept their full-size padding — which is why

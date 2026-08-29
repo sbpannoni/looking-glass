@@ -146,8 +146,48 @@ function kanbanColumnsFromTasks(tasks){
    left completely alone — that is what keeps scroll and hover stable across
    a poll. */
 function kbCardSignature(t){
+  const lc = t.link_counts || {};
+  const pr = t.progress || {};
   return [t.status, t.title, t.assignee, t.comment_count, t.completed_at,
-          t.started_at, t.block_kind, t.last_failure_error].join("|");
+          t.started_at, t.block_kind, t.last_failure_error,
+          lc.parents, lc.children, pr.done, pr.total].join("|");
+}
+
+/* ---- dependency state -------------------------------------------------
+   A decomposed card's position in the graph was invisible here. The
+   decomposer writes plain descriptive titles ("Decide amplicon sourcing
+   strategy", "Implement GFF-based sequence extraction") with no ordering
+   hint, and the board rendered only title/assignee/age — so a card sitting
+   in `todo` BECAUSE it is waiting on an unfinished parent looked exactly
+   like one that is merely queued. You had to run `hermes kanban show` per
+   card to find the order.
+
+   Hermes holds a child in `todo` while any parent is open and promotes it to
+   `ready` once they all close (the same machinery `block --kind dependency`
+   relies on). So `todo` + parents > 0 IS "blocked on dependencies" — no
+   extra request needed, the board already sends link_counts and progress. */
+function kbDepChips(t){
+  const lc = t.link_counts || {};
+  const parents = lc.parents || 0;
+  const pr = t.progress || null;
+  const chips = [];
+  if(parents){
+    // In `todo` the parents are the reason it is not running. Anywhere else
+    // they are just provenance, so say it quietly.
+    const waiting = t.status === "todo";
+    chips.push(`<span class="kb-chip kb-dep${waiting ? " waiting" : ""}"
+      title="${waiting
+        ? `Waiting on ${parents} unfinished card${parents === 1 ? "" : "s"} — it cannot start until they finish`
+        : `Depends on ${parents} earlier card${parents === 1 ? "" : "s"}`}"
+      >${waiting ? "⛓" : "↳"} ${parents}</span>`);
+  }
+  if(pr && pr.total){
+    const done = pr.done === pr.total;
+    chips.push(`<span class="kb-chip kb-kids${done ? " ok" : ""}"
+      title="${pr.done} of ${pr.total} child card${pr.total === 1 ? "" : "s"} done"
+      >${pr.done}/${pr.total}</span>`);
+  }
+  return chips.join("");
 }
 
 function kbCardInner(t){
@@ -178,7 +218,7 @@ function kbCardInner(t){
   return `<div class="kb-title">${kanbanEsc(t.title)}</div>
     ${note}
     <div class="kb-meta"><span class="kb-who">${kanbanEsc(t.assignee) || "—"}</span>
-      <span class="kb-meta-r">${comments}<span class="kb-age">${kanbanAge(t)}</span></span></div>
+      <span class="kb-meta-r">${kbDepChips(t)}${comments}<span class="kb-age">${kanbanAge(t)}</span></span></div>
     ${action}`;
 }
 
@@ -309,7 +349,7 @@ function openKanbanBoard(){
   openWorkTabTurning("kanban","board","KANBAN",(panel,tab)=>{
     panel.innerHTML = `<div class="kb-head">
         <span class="kb-head-title">BOARD</span>
-        <span class="kb-head-sub">click a card for its run log · click a lane to collapse it</span>
+        <span class="kb-head-sub">click a card for its run log · ⛓ = waiting on unfinished parents · n/m = children done</span>
         <span class="kb-head-spacer"></span>
         <label class="kb-filter">assignee <select class="kb-assignee"></select></label>
         <span class="kb-source">loading…</span>

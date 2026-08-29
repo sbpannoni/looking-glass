@@ -220,6 +220,34 @@ epoch>`) when it rewrites the body. Deliberately narrow: a broader
 is a worse failure than the one it prevents. Branches and paths are
 provisioning's to decide; the card text only ever describes the work.
 
+## Reading a decomposition on the board
+
+The decomposer writes plain descriptive titles — "Decide amplicon sourcing
+strategy", "Implement GFF-based sequence extraction", "Update PCR panel
+configuration" — with no numbering and no ordering hint. The dependency graph
+it builds is real but was invisible on the board, which rendered only title,
+assignee and age. A card sitting in `todo` BECAUSE a parent had not finished
+looked identical to one merely queued, and finding the order meant running
+`hermes kanban show` per card.
+
+Cards now carry two chips, both from data the board already sends
+(`link_counts` and `progress`, each one cheap query in the plugin API):
+
+| chip | meaning |
+|---|---|
+| **⛓ n** (amber) | in `todo` and waiting on n unfinished parents — cannot start |
+| ↳ n | depends on n earlier cards; not the reason it is not running |
+| n/m | n of m child cards done |
+
+The amber one is the load-bearing distinction: Hermes holds a child in `todo`
+while any parent is open and promotes it to `ready` once they all close, so
+`todo` + parents > 0 IS "blocked on dependencies". No extra request is needed
+to know it.
+
+Note this is inferred from status + parent count, not from a per-parent status
+lookup: it tells you a card is waiting and on how many, not which one is the
+holdup. `hermes kanban show <id>` still gives the specific ids.
+
 ## Operating it
 
 - **Audit the whole board without side effects:**
