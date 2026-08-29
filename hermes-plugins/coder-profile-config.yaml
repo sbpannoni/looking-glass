@@ -1,0 +1,96 @@
+model:
+  provider: vllm
+  default: qwen3.6-27b-awq
+  # Route via the model-name-rewriting proxy (hermes-model-proxy.service),
+  # NOT snarf:8000 directly. snarf serves ONE model at a time, so the
+  # `default:` name above 404s whenever a different one is loaded; the
+  # proxy rewrites it to whatever is actually served. The name is ADVISORY.
+  base_url: http://127.0.0.1:8010/v1
+  api_mode: chat_completions
+  max_tokens: 8192
+mcp_discovery_timeout: 15
+auxiliary:
+  title_generation:
+    provider: auto
+    model: ''
+  compression:
+    provider: auto
+    model: ''
+  approval:
+    provider: auto
+    model: ''
+  mcp:
+    provider: auto
+    model: ''
+  skills_hub:
+    provider: auto
+    model: ''
+terminal:
+  backend: local
+  cwd: /root/hermes-workspaces/coder
+mcp_servers:
+  mempalace:
+    command: ssh
+    args:
+      - -T
+      - root@192.168.1.157
+      - MEMPALACE_PALACE=/root/.mempalace/homelab /opt/mp/venv/bin/python -m mempalace.mcp_server
+    enabled: true
+    timeout: 120
+    connect_timeout: 60
+    tools:
+      include: []
+      exclude: []
+    resources: true
+    prompts: false
+approvals:
+  mode: smart
+  timeout: 120
+  cron_mode: deny
+  deny:
+    - git push --force*
+    - git push -f*
+    - rm -rf /*
+    - mkfs*
+    - dd if=* of=/dev/*
+    - git push* origin main*
+    - git push* origin master*
+    - git branch -D main*
+skills:
+  write_approval: true
+  guard_agent_created: true
+memory:
+  write_approval: true
+onboarding:
+  seen:
+    tool_progress_prompt: true
+agent:
+  disabled_toolsets:
+  - browser
+  - cronjob
+  - homeassistant
+  - tts
+
+# The CLI tool surface kanban workers are spawned with. Resolved from THIS
+# profile at dispatch time (kanban_db._resolve_worker_cli_toolsets) and passed
+# as an explicit --toolsets pin, so a plugin toolset that is not named here is
+# simply absent from the worker.
+#
+# hermes-cli  the normal composite this profile had by default.
+# darkhelix   the dispatch_to_engine tool (plugins/darkhelix-engine). Without
+#             it a worker has no sanctioned way to make code changes and falls
+#             back to editing by hand in whatever checkout it can find.
+platform_toolsets:
+  cli:
+    - hermes-cli
+    - darkhelix
+
+# Kanban workers run with HERMES_HOME set to THIS profile, and user plugins are
+# discovered per-home (get_hermes_home()/plugins). A plugin installed only at
+# ~/.hermes/plugins is therefore invisible to a worker, which is how a card
+# assigned here could be handed the  toolset name while the tool
+# behind it did not exist in its registry at all. The directory is a symlink
+# back to ~/.hermes/plugins so there is still one copy to maintain.
+plugins:
+  enabled:
+    - darkhelix-engine

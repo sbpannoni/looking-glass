@@ -2816,6 +2816,23 @@ async def _darkhelix_worktree_create(
 _HUD_CREATOR = "looking-glass"
 
 
+def _darkhelix_assignee() -> str:
+    """Profile that DARKHELIX cards are assigned to.
+
+    This filed cards with no --assignee, so they landed on `default` -- and
+    `default` has no `execution-engine-dispatch` skill (it lives under
+    profiles/coder/skills/) and no `darkhelix` toolset, so the worker got
+    neither the dispatch tool nor the instruction to use its worktree. It then
+    did what an unguided worker does: `cd /home/sam/code/projects/DARKHELIX`,
+    the SHARED checkout, while a perfectly good isolated worktree sat unused
+    (t_9116c28b, 2026-08-28).
+
+    Provisioning a worktree and then handing the card to a profile that cannot
+    be told about it is worse than not provisioning at all, because it looks
+    correct from the board."""
+    return ((CFG.get("darkhelix") or {}).get("assignee") or "coder").strip()
+
+
 def _darkhelix_forced_assignees() -> set[str]:
     """Assignees whose cards are DARKHELIX work by declaration.
 
@@ -3600,6 +3617,7 @@ async def kanban_create(request: Request) -> JSONResponse:
         f"--body {shlex.quote(body)} "
         "--workspace scratch "
         f"--idempotency-key {shlex.quote(idempotency_key)} "
+        f"--assignee {shlex.quote(_darkhelix_assignee())} "
         + (f"--parent {shlex.quote(parent_task_id)} " if parent_task_id else "")
         + "--triage --created-by looking-glass --json"
     )
