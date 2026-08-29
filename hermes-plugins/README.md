@@ -60,3 +60,56 @@ card, so a tool change reaches them on the next card without a restart; the
 claim hook runs *in* the gateway and does need one.
 
 See [../docs/TASK-ISOLATION.md](../docs/TASK-ISOLATION.md) for why these exist.
+
+## Two more things that are per-profile and fail silently
+
+Same trap as the plugin scoping above, found 2026-08-29 while making web access
+and sequential execution actually work. Both looked configured and were not.
+
+**Delegation caps are read from the PROFILE config, not `~/.hermes/config.yaml`.**
+`delegate_tool._get_max_concurrent_children()` calls `_load_config()`, which
+follows the active `HERMES_HOME`. A worker runs `-p coder`, so it reads
+`profiles/coder/config.yaml`. Setting `delegation.max_concurrent_children: 1` in
+the root config left every worker on the built-in default of **3** — the root
+home resolved to 1 and the coder profile to 3 at the same moment. There is no
+warning; the key is simply absent and the default applies. The caps now live in
+each profile's own `delegation:` block:
+
+    delegation:
+      max_concurrent_children: 1
+      max_spawn_depth: 1
+      max_async_children: 1
+
+`darkhelix` was the sharper version of this: it already *had* a `delegation:`
+block, so "is the key there" was the wrong check — it carried
+`max_concurrent_children: 3` explicitly and had to be edited, not appended to.
+Verify per profile, never once:
+
+    from hermes_constants import set_hermes_home_override
+    set_hermes_home_override("/root/.hermes/profiles/<p>")
+    from tools.delegate_tool import _get_max_concurrent_children as g; g()
+
+Note `kanban.max_in_progress` is the opposite case — it is read by the
+*dispatcher*, once, at gateway startup (outside the tick loop in
+`gateway/kanban_watchers.py:_kanban_dispatcher_watcher`), so it needs a gateway
+restart and lives in the root config. Two different caps, two different homes,
+two different reload rules.
+
+**The browser needs Chrome under the profile's HOME.** Kanban workers get the
+`browser` toolset pinned into their surface, but `browser_navigate` returned
+"Chrome not found", listing `<profile>/home/.agent-browser/browsers` and the
+Playwright cache among the paths checked. The profile HOME is remapped to
+`~/.hermes/profiles/<p>/home`, so the Playwright install under real root's
+`~/.cache/ms-playwright` was invisible — advertised tool, broken at call time,
+exactly the failure mode this file already warns about. Shared rather than
+re-downloaded per profile (379M each):
+
+    ln -s /root/.cache/ms-playwright <profile>/home/.cache/ms-playwright
+
+Done for all six profiles. This matters because `web_extract` cannot cover it:
+the only extract-capable providers (firecrawl, tavily, exa, parallel) are paid
+third-party APIs, while the self-hosted searxng backend is search-only
+(`supports_extract()` returns False). So `web_search` answers questions and the
+browser is the only way to pull a page's actual text. Verified end-to-end:
+`browser_navigate` + `browser_snapshot` returned 15.8K chars of real page
+content under both the coder and darkhelix profiles.

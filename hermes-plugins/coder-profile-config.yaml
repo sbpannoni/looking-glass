@@ -94,3 +94,12 @@ platform_toolsets:
 plugins:
   enabled:
     - darkhelix-engine
+
+# Serialise sub-agent spawning. Kanban workers run with HERMES_HOME set to THIS
+# profile, and delegation caps are read per-profile (delegate_tool._load_config),
+# so a value set only in ~/.hermes/config.yaml leaves workers on the default of 3.
+# Capturing true sequential behaviour first; ai-tune can raise this later.
+delegation:
+  max_concurrent_children: 1
+  max_spawn_depth: 1
+  max_async_children: 1
