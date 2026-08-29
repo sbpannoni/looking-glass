@@ -2613,7 +2613,26 @@ def _parse_darkhelix_todo(text: str) -> list[dict]:
 # Branch and path derive from the TASK ID, never from the card body: the
 # triage specifier rewrites title and body on promotion, so anything parsed
 # back out of the body is untrustworthy by the time it matters.
-DARKHELIX_WT_ROOT = "/home/sam/darkhelix-wt"   # `sam` cannot write at /ssdpool root
+# ONE ROOT FOR AGENT WORK, on the box the work happens on.
+#
+# It used to be spread over five places across two hosts: card worktrees under
+# /home/sam, engine attempt trees under /ssdpool/coder-engine, patches and
+# attachments under /root/.hermes on CT111, and — because nothing said
+# otherwise — whatever an agent picked in /tmp. That last one is not
+# hypothetical: one run left its finished rewrite at /tmp/synthetic_pcr_new.py
+# and an earlier attempt left a whole worktree at /tmp/darkhelix_worktree.
+# /tmp is cleared on reboot, so "where did the work go" had five answers and a
+# deadline.
+#
+# Everything a card produces on snarf now lives under one per-task directory:
+#
+#     /ssdpool/agent-work/<task_id>/worktree/        the card's git worktree
+#     /ssdpool/agent-work/<task_id>/attempts/<n>/    engine attempt + output
+#
+# One place to look, one to back up, one to point a cleanup job at. The
+# directory is created by hand (sudo, owned by sam, setgid) because /ssdpool's
+# root is root-owned; sam owns everything beneath it.
+DARKHELIX_WORK_ROOT = "/ssdpool/agent-work"
 DARKHELIX_BASE_BRANCH = "master"
 
 # The repo is 1.5 TB on disk and 5.7 MB of tracked source -- the rest is
@@ -2628,8 +2647,13 @@ def _dh_branch(task_id: str) -> str:
     return f"hermes/{task_id}"
 
 
+def _dh_task_dir(task_id: str) -> str:
+    """Everything this card produces on snarf, in one place."""
+    return f"{DARKHELIX_WORK_ROOT}/{task_id}"
+
+
 def _dh_worktree(task_id: str) -> str:
-    return f"{DARKHELIX_WT_ROOT}/{task_id}"
+    return f"{_dh_task_dir(task_id)}/worktree"
 
 
 # The dispatch-target block is the contract between this server (which
@@ -2759,7 +2783,7 @@ async def _darkhelix_worktree_create(
         f"if [ -d {shlex.quote(wt)} ]; then echo 'worktree already present'; "
         f'echo "BASE=$(cd {shlex.quote(wt)} && git rev-parse --abbrev-ref HEAD)"; '
         f'echo "MISSING="; echo "MERGED="; echo "UNMERGED="; exit 0; fi; '
-        f"set -e; mkdir -p {shlex.quote(DARKHELIX_WT_ROOT)}; "
+        f"set -e; mkdir -p {shlex.quote(_dh_task_dir(task_id))}; "
         f"cd {shlex.quote(DARKHELIX_REPO_PATH)}; git fetch origin --quiet; "
         f"MERGE_LIST=''; MISSING=''; {pick_base}"
         f'git worktree add {shlex.quote(wt)} -b {shlex.quote(branch)} "$BASE"; '

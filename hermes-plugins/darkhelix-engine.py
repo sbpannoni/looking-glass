@@ -47,7 +47,13 @@ from typing import Any, Dict
 SNARF = "sam@192.168.1.239"
 SNARF_KEY = "/root/.hermes/profiles/coder/snarf_key"
 ENGINE = "/ssdpool/coder-engine/pipeline/dispatch_task.py"
-ATTEMPTS = "/ssdpool/coder-engine/dispatch-attempts"
+# One root for everything a card produces on snarf:
+#   /ssdpool/agent-work/<task_id>/worktree/     the card's git worktree
+#   /ssdpool/agent-work/<task_id>/attempts/     one dir per engine attempt
+# Attempts are counted from this card's own directory, so the number means
+# "attempts on THIS card" rather than "entries matching a prefix in a shared
+# pile".
+AGENT_WORK = "/ssdpool/agent-work"
 LOCAL_PATCHES = "/root/.hermes/kanban/engine-patches"
 # Absolute, not PATH-resolved. This binary is what marks the card complete;
 # a worker spawned with a trimmed PATH would fail at exactly the step whose
@@ -132,8 +138,8 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
 
     # Attempt number, counted from what is actually on disk rather than from
     # anything the model tracks.
-    ls = _ssh(f"ls -1 {shlex.quote(ATTEMPTS)} 2>/dev/null | grep -c "
-              f"{shlex.quote('^' + task_id + '-engine-')} || true")
+    attempts_dir = f"{AGENT_WORK}/{task_id}/attempts"
+    ls = _ssh(f"ls -1d {shlex.quote(attempts_dir)}/engine-* 2>/dev/null | wc -l")
     try:
         prior = int((ls.stdout or "0").strip() or 0)
     except ValueError:
@@ -147,7 +153,7 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
 
     n = prior + 1
     branch = f"hermes/{task_id}-engine-{n}"
-    out_dir = f"{ATTEMPTS}/{task_id}-engine-{n}/output"
+    out_dir = f"{attempts_dir}/engine-{n}/output"
 
     # The spec the engine works from: the card, minus the machinery block.
     description = (args.get("amended_description") or "").strip()

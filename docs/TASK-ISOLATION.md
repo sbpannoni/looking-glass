@@ -236,8 +236,27 @@ provisioning's to decide; the card text only ever describes the work.
 
 ## Worktree layout on snarf
 
-Worktrees live at `/home/sam/darkhelix-wt/<task_id>` (`sam` cannot write at
-the `/ssdpool` root). The repo is 1.5 TB on disk but only ~6 MB of tracked
+**One root for everything a card produces on snarf:**
+
+    /ssdpool/agent-work/<task_id>/worktree/     the card's git worktree
+    /ssdpool/agent-work/<task_id>/attempts/     one dir per engine attempt
+
+It used to be spread over five places across two hosts — worktrees under
+`/home/sam`, engine attempts in a flat pile under `/ssdpool/coder-engine`,
+patches and attachments under `/root/.hermes` on CT111, and, because nothing
+said otherwise, whatever an agent picked in `/tmp`. That last one is not
+hypothetical: one run left its finished rewrite at `/tmp/synthetic_pcr_new.py`
+and an earlier attempt left a whole worktree at `/tmp/darkhelix_worktree`.
+`/tmp` is cleared on reboot, so "where did the work go" had five answers and a
+deadline.
+
+The root is created by hand (`sudo mkdir`, owned by `sam`, setgid) because
+`/ssdpool`'s root is root-owned; everything beneath it is `sam`'s. The engine
+falls back to its old flat `dispatch-attempts/` root for anything that is not
+a provisioned kanban task, so the toy and eval-harness paths are unchanged.
+
+Patches and attachments still live under `~/.hermes` on CT111 — `hermes kanban
+attach` needs a local file, so that one cannot move to snarf. The repo is 1.5 TB on disk but only ~6 MB of tracked
 source; `database/`, `thirdParty/`, `testData/` and `.venv-dev/` are symlinked
 back to the primary checkout so a card can actually run. Outputs
 (`DARKHELIX_output/`, `testruns/`) are deliberately **not** shared, so two
