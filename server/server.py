@@ -2642,6 +2642,25 @@ DARKHELIX_BASE_BRANCH = "master"
 # testruns/ stay per-worktree so two cards cannot overwrite each other.
 DARKHELIX_SHARED = ("database", "thirdParty", "testData", ".venv-dev")
 
+# Artefacts the toolchain drops in the tree that must never reach a commit.
+#
+# Every engine attempt otherwise carried two of them, reproduced byte-for-byte
+# across runs: an uninvited `.aider*` line appended to .gitignore, and an empty
+# stringutils.py (the toy repo's filename). commit_node stages with `git add
+# -A`, so both rode along into the patch.
+#
+# Excluding them is strictly better than narrowing what commit_node stages,
+# which would also silently drop legitimately-added files -- a new test being
+# the obvious case, and one the specs here explicitly contemplate. This is a
+# named exclusion of two known artefacts; anything genuinely new still commits.
+#
+# `.aider*` also stops Aider writing to .gitignore in the first place rather
+# than just hiding the result: aider/main.py's check_gitignore() appends the
+# pattern only `if not repo.ignored(".aider")`, and that check is git
+# check-ignore, which honours info/exclude. Ignored here, it returns early and
+# never opens the file.
+DARKHELIX_AGENT_ARTIFACTS = (".aider*", "stringutils.py")
+
 
 def _dh_branch(task_id: str) -> str:
     return f"hermes/{task_id}"
@@ -2752,7 +2771,7 @@ async def _darkhelix_worktree_create(
     excludes = "; ".join(
         f"grep -qxF {shlex.quote(d)} \"$GITCOMMON/info/exclude\" 2>/dev/null || "
         f"echo {shlex.quote(d)} >> \"$GITCOMMON/info/exclude\""
-        for d in DARKHELIX_SHARED
+        for d in DARKHELIX_SHARED + DARKHELIX_AGENT_ARTIFACTS
     )
     default_base = f"origin/{DARKHELIX_BASE_BRANCH}"
     # Resolve the base on snarf, not here: only the repo knows which parent

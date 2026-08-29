@@ -262,6 +262,22 @@ back to the primary checkout so a card can actually run. Outputs
 (`DARKHELIX_output/`, `testruns/`) are deliberately **not** shared, so two
 cards cannot overwrite each other's results.
 
+`.git/info/exclude` also carries `.aider*` and `stringutils.py`. Every engine
+attempt otherwise committed two artefacts, reproduced byte-for-byte across
+runs: an uninvited `.aider*` line appended to `.gitignore`, and an empty
+`stringutils.py` (the toy repo's filename). `commit_node` stages with `git add
+-A`, so both rode into the patch.
+
+Excluding them beats narrowing what `commit_node` stages, which would also
+silently drop legitimately-added files — a new test being the obvious case,
+and one these specs explicitly contemplate. Verified: with both excluded,
+`git add -A` still stages a new `.py` file and drops only the artefacts.
+
+`.aider*` also stops Aider writing to `.gitignore` rather than merely hiding
+the result. `aider/main.py`'s `check_gitignore()` appends the pattern only
+`if not repo.ignored(".aider")`, and that check is `git check-ignore`, which
+honours `info/exclude` — so it returns before opening the file.
+
 Those symlinks are added to `.git/info/exclude` at provision time.
 `.gitignore` ignores them as `database/` etc. — patterns with a trailing slash
 match a *directory*, and in a worktree they are *symlinks*, so the patterns
