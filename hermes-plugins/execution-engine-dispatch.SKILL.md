@@ -65,6 +65,33 @@ that needs a mind: deciding what a failed attempt actually means.
    attempts remain, that is not a prompt to try something else — block the
    card and say precisely what is unresolved.
 
+## Reviewing someone else's work: read the branch, not the patch
+
+If your card reviews another card's output — a root card waking after its
+children finish, or any check on work you did not do — **read the branch**:
+
+    git show <branch>            # what the code IS
+    git log --oneline master..<branch>
+
+An attached patch is a COPY, and a copy can be stale. On 2026-08-29 card
+t_5f2479af produced two patches 31 minutes apart, both named
+`t_5f2479af-engine-1.patch`; the attach step disambiguated the second with a
+` (1)` filename suffix that says nothing about which is current. A root card
+reviewing it read the older one, correctly identified a real bug in it, and
+then blocked the work and spawned a fix card — for code that had already been
+replaced. Its reasoning was sound; the artifact misrepresented itself. Patches
+are now named by commit sha so this cannot recur, but the branch is still the
+only thing that is definitionally current.
+
+**Before reporting a defect in code, quote it from the branch.** Give
+`path:line` and the actual text as it exists there. If you cannot point at the
+line, you do not have a finding yet — you have a hypothesis, and saying so is
+the honest report.
+
+**Better still, run it.** A claim like "this loads 0 rows" is checkable in one
+command. A blocked card and a spawned fix task are expensive; a `python -c`
+against the real input is not.
+
 ## Write down what you learned
 
 You are one of many short-lived workers. Your session ends with the card and

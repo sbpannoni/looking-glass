@@ -238,7 +238,20 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
     attached = None
     if patch_remote:
         os.makedirs(LOCAL_PATCHES, exist_ok=True)
-        local = os.path.join(LOCAL_PATCHES, f"{task_id}-engine-{n}.patch")
+        # Named by COMMIT, not by attempt number.
+        #
+        # `{task_id}-engine-{n}.patch` let two artifacts claim the same
+        # identity: card t_5f2479af produced two patches 31 minutes apart, both
+        # named -engine-1, and `hermes kanban attach` disambiguated with a
+        # " (1)" filename suffix that says nothing about which is current. The
+        # root card reviewing it read the OLDER one, correctly diagnosed a real
+        # bug in it, and blocked the work plus spawned a fix card -- for code
+        # that had already been replaced. Its analysis was right about the
+        # artifact it was handed; the artifact was wrong about itself.
+        #
+        # A SHA cannot collide and can be checked against the branch, so the
+        # ambiguity is removed rather than discouraged.
+        local = os.path.join(LOCAL_PATCHES, f"{task_id}-{sha}.patch")
         scp = subprocess.run(
             ["scp", "-i", SNARF_KEY, "-o", "BatchMode=yes",
              "-o", "StrictHostKeyChecking=no",
@@ -275,8 +288,17 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
               f"git merge --ff-only {shlex.quote(branch)} 2>&1", timeout=120)
     card_branch_advanced = ff.returncode == 0
 
-    summary = (f"engine attempt {n} passed its test gate on {branch}; "
-               f"patch {'attached' if patch_ok else 'NOT attached'}")
+    # The commit this attempt actually produced. Used to NAME the patch, so an
+    # artifact can never misrepresent which code it is.
+    sha_p = _ssh(f"cd {shlex.quote(worktree)} && git rev-parse --short {shlex.quote(branch)}",
+                 timeout=60)
+    sha = (sha_p.stdout or "").strip()[:12] or f"attempt{n}"
+
+    # Name the commit in the summary too: whoever reviews this should be able
+    # to check any artifact against the branch without guessing.
+    summary = (f"engine attempt {n} passed its test gate on {branch} at {sha}; "
+               f"patch {'attached as ' + os.path.basename(str(attached)) if patch_ok else 'NOT attached'}. "
+               f"Review `git show {branch}` — the branch is authoritative, a patch is a copy.")
     comp = subprocess.run([HERMES, "kanban", "complete", task_id, "--summary", summary],
                           capture_output=True, text=True, timeout=120)
     return _json({
@@ -284,6 +306,7 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
         "engine_status": "done",
         "attempt": n,
         "branch": branch,
+        "commit": sha,
         "patch": attached,
         "patch_attached": patch_ok,
         "card_branch_advanced": card_branch_advanced,

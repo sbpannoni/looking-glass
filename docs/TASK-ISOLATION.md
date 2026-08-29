@@ -319,6 +319,36 @@ tests for a month after it had 624, so every worker that read it started from a
 false number. The skill therefore says to CORRECT a wrong entry rather than add
 a second one beside it.
 
+## Artifacts must not misrepresent themselves
+
+A review is only as good as the artifact it reads. On 2026-08-29 card
+t_5f2479af attached TWO patches 31 minutes apart, both named
+`t_5f2479af-engine-1.patch` — the attach step disambiguated the second with a
+` (1)` filename suffix that says nothing about which is current. The root card
+reviewing it read the older one, correctly identified a real positional-parsing
+bug **in that patch**, and then blocked the work and spawned a fix card for
+code that had already been replaced. Its reasoning was sound throughout; the
+artifact was wrong about itself.
+
+This is the same shape as the `wt/...` branch that started this work: a card
+asserting a state of the world nothing had created. Neither is a context
+problem — more context would not have helped, because the artifact was
+internally consistent and simply stale.
+
+Two changes:
+
+- **Patches are named by commit sha** (`{task_id}-{sha}.patch`), not by attempt
+  number. Two artifacts cannot claim one identity, and any reader can check the
+  name against the branch. The completion summary names the branch and sha too.
+- **The skill says to review the BRANCH, not the patch.** `git show <branch>`
+  is definitionally current; a patch is a copy. And before reporting a defect,
+  quote `path:line` from the branch — if you cannot point at the line you have
+  a hypothesis, not a finding. Better still, run it: "this loads 0 rows" is one
+  command to check, and a blocked card plus a spawned fix task is expensive.
+
+The test gate cannot catch this class. It verifies *code*; this was a claim
+*about* code.
+
 ## Operating it
 
 - **Audit the whole board without side effects:**
