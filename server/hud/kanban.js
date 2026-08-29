@@ -585,6 +585,81 @@ function refreshOpenKanbanBoards(){
   document.querySelectorAll(".work-panel.kanban-pane").forEach(p => refreshKanbanPanel(p));
 }
 
+/* ---- editing a card from the board -----------------------------------
+   The diagnosis loop turns on amending a spec — a red test gate usually means
+   the card was short — and the worker can do that via
+   dispatch_to_engine(amended_description=...). A HUMAN could not: there was no
+   way to edit a card from the board in any status. "Amend the card and unblock
+   it" was advice with no field to type into.
+
+   Collapsed by default: this pane is for watching a run, and an always-open
+   textarea over the log would be the wrong default. */
+function kbWireEdit(panel, taskId){
+  const toggle = panel.querySelector(".kb-edit-toggle");
+  const body   = panel.querySelector(".kb-edit-body");
+  const text   = panel.querySelector(".kb-edit-text");
+  const status = panel.querySelector(".kb-edit-status");
+  const say = (msg, cls) => { status.innerHTML = cls ? `<span class="${cls}">${kanbanEsc(msg)}</span>` : kanbanEsc(msg); };
+
+  // The stored body carries the machine-written dispatch-target block. Editing
+  // is offered on the task text only, so it cannot be clobbered by hand; the
+  // server re-attaches it on save.
+  const stripTarget = (b) => (b || "").replace(/\[dispatch-target\][\s\S]*?\[\/dispatch-target\]\s*/, "").trim();
+
+  const load = async () => {
+    try{
+      const r = await fetch(`/api/kanban/${encodeURIComponent(taskId)}`);
+      const j = await r.json();
+      text.value = stripTarget((j.task || {}).body);
+      text.placeholder = "";
+    }catch(err){ say("could not load: " + err.message, "err"); }
+  };
+
+  toggle.onclick = () => {
+    const opening = body.hidden;
+    body.hidden = !opening;
+    toggle.textContent = opening ? "edit ▴" : "edit ▾";
+    if(opening && !text.value) load();
+  };
+
+  panel.querySelector(".kb-edit-cancel").onclick = () => {
+    body.hidden = true; toggle.textContent = "edit ▾"; say(""); load();
+  };
+
+  panel.querySelector(".kb-edit-save").onclick = async () => {
+    const btn = panel.querySelector(".kb-edit-save");
+    btn.disabled = true; say("saving…", "warn");
+    try{
+      const r = await fetch(`/api/kanban/${encodeURIComponent(taskId)}/edit`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({body: text.value}),
+      });
+      const j = await r.json();
+      say(j.ok ? "spec saved — unblock or reclaim the card to retry with it"
+               : "save failed: " + (j.error || "unknown"), j.ok ? "ok" : "err");
+    }catch(err){ say("save failed: " + err.message, "err"); }
+    btn.disabled = false;
+  };
+
+  panel.querySelector(".kb-comment-add").onclick = async () => {
+    const input = panel.querySelector(".kb-comment-text");
+    const val = input.value.trim();
+    if(!val) return;
+    const btn = panel.querySelector(".kb-comment-add");
+    btn.disabled = true; say("commenting…", "warn");
+    try{
+      const r = await fetch(`/api/kanban/${encodeURIComponent(taskId)}/comment`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({text: val}),
+      });
+      const j = await r.json();
+      if(j.ok){ input.value = ""; say("comment added — a retrying worker reads these", "ok"); }
+      else say("comment failed: " + (j.error || "unknown"), "err");
+    }catch(err){ say("comment failed: " + err.message, "err"); }
+    btn.disabled = false;
+  };
+}
+
 /* A task's run log is the live transcript of Hermes working. Polled rather
    than streamed: the log is a file on another box, and a 3s poll is far
    simpler than plumbing a second websocket for something read-only.
@@ -603,12 +678,32 @@ function openTaskLog(taskId){
         <button class="btn kb-land-btn" title="Verify, commit, push the card's branch, and open a PR if the check passes">Land ▸</button>
         <span class="kb-verify-status"></span>
       </div>
+      <div class="kb-edit">
+        <div class="kb-edit-head">
+          <span>SPEC</span>
+          <span class="kb-edit-note">the dispatch-target block is machinery — it is kept for you and not shown</span>
+          <span class="kb-edit-spacer"></span>
+          <span class="kb-edit-status"></span>
+          <button class="kb-edit-toggle" type="button">edit ▾</button>
+        </div>
+        <div class="kb-edit-body" hidden>
+          <textarea class="kb-edit-text" spellcheck="false" placeholder="loading…"></textarea>
+          <div class="kb-edit-actions">
+            <button class="btn kb-edit-save">Save spec</button>
+            <button class="btn kb-edit-cancel">Cancel</button>
+            <span class="kb-edit-sep">·</span>
+            <input class="kb-comment-text" type="text" placeholder="add a comment for the next attempt…">
+            <button class="btn kb-comment-add">Comment</button>
+          </div>
+        </div>
+      </div>
       <pre class="kb-verify-out" hidden></pre>
       <pre class="kb-log">loading…</pre>`;
     panel.classList.add("tasklog-pane");
     const statusEl = panel.querySelector(".kb-log-status");
     const pre = panel.querySelector(".kb-log");
     kbWireVerify(panel, taskId);
+    kbWireEdit(panel, taskId);
     // Delegated: the status line is rebuilt on every 3s poll, so a handler
     // bound to the button itself would be thrown away a moment later.
     statusEl.addEventListener("click", (e) => {

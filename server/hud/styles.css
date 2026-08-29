@@ -660,6 +660,46 @@ button.btn.kb-log-reclaim{
 }
 button.btn.kb-log-reclaim:disabled{opacity:.5; cursor:default}
 
+/* ---- edit the card (task log pane) ----
+   Collapsed by default: this pane is for watching a run, so the editor stays
+   out of the way until asked for. */
+.kb-edit{
+  flex:0 0 auto; margin-bottom:6px; border:1px solid var(--line);
+  border-left:2px solid var(--cyan-dim); border-radius:6px;
+  background:color-mix(in srgb, var(--panel) 70%, transparent);
+}
+.kb-edit-head{
+  display:flex; align-items:center; gap:8px; padding:5px 10px;
+  font-family:'Orbitron'; font-size:8.5px; letter-spacing:2px; color:var(--txt-dim);
+}
+.kb-edit-note{font-family:'Rajdhani'; font-size:10.5px; letter-spacing:0; color:var(--txt-dim); opacity:.75}
+.kb-edit-spacer{flex:1 1 auto}
+.kb-edit-status{font-family:'Rajdhani'; font-size:11px; letter-spacing:0}
+.kb-edit-toggle{
+  background:none; border:1px solid var(--line); border-radius:5px; color:var(--txt-dim);
+  font-family:'Rajdhani'; font-size:11px; padding:1px 8px; cursor:pointer;
+}
+.kb-edit-toggle:hover{border-color:var(--cyan); color:var(--cyan)}
+.kb-edit-body{padding:0 10px 9px}
+.kb-edit-text{
+  width:100%; height:150px; resize:vertical; padding:8px 10px;
+  background:var(--bg); border:1px solid var(--line); border-radius:6px;
+  color:var(--txt); font-family:ui-monospace,Menlo,Consolas,monospace;
+  font-size:12px; line-height:1.45; outline:none;
+}
+.kb-edit-text:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+.kb-edit-actions{display:flex; align-items:center; gap:8px; margin-top:7px; flex-wrap:wrap}
+button.btn.kb-edit-save, button.btn.kb-edit-cancel, button.btn.kb-comment-add{
+  font-size:9px; padding:4px 10px; letter-spacing:1px;
+}
+.kb-edit-sep{color:var(--txt-dim)}
+.kb-comment-text{
+  flex:1 1 200px; min-width:0; padding:4px 8px; background:var(--bg);
+  border:1px solid var(--line); border-radius:5px; color:var(--txt);
+  font-family:'Rajdhani'; font-size:12px; outline:none;
+}
+.kb-comment-text:focus{border-color:var(--cyan-dim)}
+
 /* ---- verify-on-snarf control (task log pane) ---- */
 .kb-verify{
   flex:0 0 auto; display:flex; align-items:center; gap:8px; flex-wrap:wrap;

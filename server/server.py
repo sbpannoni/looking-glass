@@ -2499,6 +2499,67 @@ async def kanban_pause(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "paused": want, "detail": out.strip()[-300:]})
 
 
+# ------------------------------------------------------------- edit a card
+# The whole diagnosis loop turns on amending a spec: a red test gate usually
+# means the card was short, and the fix is to say the missing thing and retry.
+# The worker can do that (`dispatch_to_engine(amended_description=...)`), but a
+# HUMAN had no way to edit a card at all from the board -- not blocked, not
+# ready, not any status. Telling someone "amend the card and unblock it" while
+# giving them no field to type in is not a workflow.
+#
+# The dispatch-target block is deliberately NOT editable here. It is written by
+# provisioning and describes machinery (worktree, branch, base) that a person
+# editing a spec has no reason to retype and every reason to clobber by
+# accident. It is stripped before editing and re-attached on save, so the
+# textarea holds exactly the task text and nothing else.
+
+@app.post("/api/kanban/{task_id}/edit")
+async def kanban_edit(task_id: str, request: Request) -> JSONResponse:
+    """Replace a card's task text, preserving its dispatch-target block."""
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    payload = await request.json()
+    new_text = (payload.get("body") or "").strip()
+    if not new_text:
+        return JSONResponse({"ok": False, "error": "body is empty"}, status_code=400)
+    try:
+        detail = await _kanban_task_detail(task_id)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": f"board unreadable: {exc}"},
+                            status_code=502)
+    old_body = (detail.get("task") or {}).get("body") or ""
+    m = _DISPATCH_TARGET_RE.search(old_body)
+    block = (m.group(0) + "\n\n") if m else ""
+    try:
+        await asyncio.to_thread(
+            _kanban_api_call, "PATCH",
+            f"/api/plugins/kanban/tasks/{quote(task_id)}",
+            json={"body": block + new_text})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    return JSONResponse({"ok": True, "dispatch_target_preserved": bool(block)})
+
+
+@app.post("/api/kanban/{task_id}/comment")
+async def kanban_comment(task_id: str, request: Request) -> JSONResponse:
+    """Append a comment. Comments outlive the pane and a retrying worker reads
+    them, so this is how a human hands a finding to the next attempt."""
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    payload = await request.json()
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"ok": False, "error": "comment is empty"}, status_code=400)
+    try:
+        rc, out = await _kanban_ssh(
+            f"hermes kanban comment {shlex.quote(task_id)} {shlex.quote(text[:4000])}")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": out[-500:]}, status_code=502)
+    return JSONResponse({"ok": True})
+
+
 @app.post("/api/kanban/archive")
 async def kanban_archive(request: Request) -> JSONResponse:
     """The review-then-deemphasize mechanism for a done card: archives it
@@ -3843,8 +3904,14 @@ async def kanban_task(task_id: str) -> JSONResponse:
         detail = await _kanban_api_get(f"/api/plugins/kanban/tasks/{quote(task_id)}")
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=502)
+    # `body` is deliberately absent from _KANBAN_TASK_FIELDS: the BOARD carries
+    # every card and full bodies would bloat a 15s poll for text nothing on the
+    # board renders. A single card is different -- the edit pane needs the spec
+    # it is about to edit, and one body is one body.
+    task = _kanban_task_slim(detail.get("task") or {})
+    task["body"] = (detail.get("task") or {}).get("body") or ""
     return JSONResponse({
-        "task": _kanban_task_slim(detail.get("task") or {}),
+        "task": task,
         "comments": detail.get("comments") or [],
         "runs": detail.get("runs") or [],
         "links": detail.get("links") or [],
