@@ -123,6 +123,27 @@ Correct an entry you find to be wrong rather than adding a second one beside
 it. `coder`'s memory spent a month asserting DARKHELIX had 270 tests when it
 had 624, and every worker that read it started from a false number.
 
+## When the card needs a fact you do not have
+
+A card that turns on how a third-party library actually behaves is the case
+where guessing costs the most: the engine implements the guess, the test gate
+goes red, and the attempt is spent. Look it up instead.
+
+- **`web_search`** — for the question. Backed by a self-hosted searxng, so it
+  costs nothing and leaves the network. Titles and descriptions are often
+  enough to settle an API signature or a format question.
+- **`browser_navigate`** then **`browser_snapshot`** — for the page itself,
+  when the snippet is not enough and you need the actual documentation text.
+
+**`web_extract` does not work here** and is not worth an attempt: every
+extract-capable backend is a paid third-party API, and the searxng backend is
+search-only. The browser is the way to read a page.
+
+This is for a genuine unknown about the outside world — a library's contract,
+a file format, an error message with no obvious cause. It is not a substitute
+for reading the worktree, which is faster and authoritative for anything about
+*this* codebase.
+
 ## Invariants
 
 - **Never edit files yourself**, and never reach for `execute_code`,
