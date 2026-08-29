@@ -65,6 +65,37 @@ that needs a mind: deciding what a failed attempt actually means.
    attempts remain, that is not a prompt to try something else — block the
    card and say precisely what is unresolved.
 
+## Write down what you learned
+
+You are one of many short-lived workers. Your session ends with the card and
+nothing about it survives unless you record it, so anything you had to work
+out the hard way will be worked out the hard way again by the next worker —
+and it has been, repeatedly.
+
+Real examples, each rediscovered more than once before a human wrote it down:
+`/ssdpool` does not exist on this host and the worktree is on snarf; the
+engine is reached through `dispatch_to_engine` and not by hand; a red test
+gate usually means the spec was short, not that the edit was wrong.
+
+**Before you finish — completing OR blocking — ask whether you learned
+something that would have saved you time at the start. If so, record it.**
+One or two lines. A fact, not a narrative. Skip it when the answer is no;
+a log of "worked on card X" is worse than nothing.
+
+Which store depends on who else needs it:
+
+- **`mempalace`** — anything true regardless of which profile hits it: where
+  something lives, how a tool actually behaves, a trap in the environment.
+  This is shared across every profile and every box in the fleet, so it is
+  where a fact stops being rediscovered.
+- **`memory`** — habits specific to THIS profile's work. It is scoped to the
+  profile (`~/.hermes/profiles/<profile>/memories/`) and invisible to the
+  others, so a fleet-wide fact put here is a fact only you will ever see.
+
+Correct an entry you find to be wrong rather than adding a second one beside
+it. `coder`'s memory spent a month asserting DARKHELIX had 270 tests when it
+had 624, and every worker that read it started from a false number.
+
 ## Invariants
 
 - **Never edit files yourself**, and never reach for `execute_code`,

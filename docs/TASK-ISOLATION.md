@@ -288,6 +288,37 @@ was ~60 minutes, and the wedged runs that started this work sat at 2h+
 producing nothing. Exceeding it makes the dispatcher **requeue** the card, so
 an overrun costs a retry, not the work.
 
+## Memory: siloed per profile, shared via mempalace
+
+Workers get all the repetitions and keep none of them. Every durable lesson
+from the 2026-08-28 build-out — `/ssdpool` is not on CT111, the worktree is on
+snarf, `dispatch_to_engine` is the only sanctioned path, a red gate usually
+means a short spec — was rediscovered by more than one worker and then written
+down by a human. Nothing the workers learned survived their own sessions.
+
+The capability was there the whole time: `memory` is a TOOL and it is in the
+worker toolset. Nothing ever asked them to use it, and the `nudge_interval` /
+`flush_min_turns` settings target long conversational sessions, not one-shot
+`chat -q` workers that die with the card. So the skill now asks, once, before
+finishing.
+
+**The two stores are not equivalent:**
+
+| store | scope | use for |
+|---|---|---|
+| `memory` | **per profile** — `get_hermes_home()/memories`, and `-p <profile>` swaps `HERMES_HOME` | habits specific to that profile's work |
+| `mempalace` | **shared** — one MCP server on CT110 (`/root/.mempalace/homelab`), reached by every profile and box | facts true regardless of who hits them |
+
+That distinction is load-bearing. All four profiles carry their own identical,
+stale copy of the same two memory files from July, because a fact written to
+`coder`'s memory is invisible to `bioinformatics`. A fleet-wide fact belongs in
+mempalace or it will be learned again by the next profile.
+
+Stale memory is worse than none: `coder`'s memory asserted DARKHELIX had 270
+tests for a month after it had 624, so every worker that read it started from a
+false number. The skill therefore says to CORRECT a wrong entry rather than add
+a second one beside it.
+
 ## Operating it
 
 - **Audit the whole board without side effects:**
