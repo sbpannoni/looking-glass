@@ -70,6 +70,23 @@ def _audit(line: str) -> None:
         pass
 
 
+# Runtime ceiling for a card that has none.
+#
+# `hermes kanban create --max-runtime` sets this, and every card filed by hand
+# here does. The DECOMPOSER sets nothing, so its children run uncapped: on
+# 2026-08-28 t_7c57772b ran 1h01m, finished the work the card asked for at
+# ~45m, then carried on regenerating testruns nobody had asked about, and only
+# stopped because a human noticed.
+#
+# 90 minutes is chosen against the evidence rather than picked round: an engine
+# round-trip is 3-5 minutes, the longest genuinely useful run observed was
+# ~60 minutes, and the wedged runs that started all of this sat at 2h+
+# producing nothing. It is a ceiling on pathology, not a budget for work.
+#
+# Cheap to be wrong about: exceeding it makes the dispatcher REQUEUE the card
+# (a `timed_out` outcome), so an overrun costs a retry, not the work.
+_DEFAULT_MAX_RUNTIME_SECONDS = 5400
+
 _CONFIG_PATH = Path(__file__).with_name("config.json")
 _DEFAULT_URL = "https://192.168.1.241"
 
@@ -79,6 +96,13 @@ _DEFAULT_URL = "https://192.168.1.241"
 # before its tree exists. The timeout only stops an unreachable HUD from
 # stalling the dispatcher indefinitely.
 _TIMEOUT_SECONDS = 60
+
+
+def _config_value(key: str, default):
+    try:
+        return json.loads(_CONFIG_PATH.read_text()).get(key, default)
+    except Exception:
+        return default
 
 
 def _config() -> tuple[str, str]:
@@ -95,10 +119,50 @@ def _config() -> tuple[str, str]:
     return url.rstrip("/"), token
 
 
+def _apply_default_runtime_cap(task_id: str) -> None:
+    """Give a card a runtime ceiling if it has none.
+
+    Set at claim time rather than creation because the decomposer creates its
+    children directly in the DB and there is no config default to hook. The
+    dispatcher's timeout sweep reads the task's live ``max_runtime_seconds``
+    on every tick, so a value written here covers the run that is starting.
+
+    Never lowers an existing cap: a card that asked for longer asked on
+    purpose."""
+    try:
+        cap = int(_config_value("max_runtime_seconds", _DEFAULT_MAX_RUNTIME_SECONDS))
+    except (TypeError, ValueError):
+        cap = _DEFAULT_MAX_RUNTIME_SECONDS
+    if cap <= 0:
+        return
+    try:
+        from hermes_cli import kanban_db as kb
+        with kb.connect_closing() as conn:
+            row = conn.execute(
+                "SELECT max_runtime_seconds FROM tasks WHERE id = ?", (task_id,)
+            ).fetchone()
+            if row is None or row[0] is not None:
+                return
+            conn.execute(
+                "UPDATE tasks SET max_runtime_seconds = ? "
+                "WHERE id = ? AND max_runtime_seconds IS NULL",
+                (cap, task_id),
+            )
+            conn.commit()
+        logger.info("darkhelix-isolation: %s had no runtime cap; set %ds",
+                    task_id, cap)
+        _audit(f"{task_id} CAP set max_runtime={cap}s (was unset)")
+    except Exception as exc:
+        logger.warning("darkhelix-isolation: could not cap %s: %s", task_id, exc)
+
+
 def _on_task_claimed(**kwargs) -> None:
     task_id = kwargs.get("task_id")
     if not task_id:
         return
+    # Independent of provisioning: an uncapped card is a problem whether or
+    # not it is DARKHELIX work.
+    _apply_default_runtime_cap(task_id)
     url, token = _config()
     if not token:
         logger.warning(

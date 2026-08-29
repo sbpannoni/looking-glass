@@ -248,6 +248,46 @@ Note this is inferred from status + parent count, not from a per-parent status
 lookup: it tells you a card is waiting and on how many, not which one is the
 holdup. `hermes kanban show <id>` still gives the specific ids.
 
+## Stopping the pipeline without losing anything
+
+`hermes pause` is Hermes's own global stop and is exactly the right shape for
+this: the dispatcher checks it every tick BEFORE spawning, so it takes effect
+on the next pass with no restart; **in-flight workers are never killed**; and
+cards stay `ready`, so `hermes resume` continues precisely where it stopped.
+
+It was only reachable from a shell on CT111, which meant the way to stop
+runaway work *from the board* was to reclaim cards one at a time — killing
+their workers and losing whatever they had done. It is now a button on the
+board (`⏸ pause dispatch`) over `GET`/`POST /api/kanban/pause`.
+
+Two details that matter:
+
+- The button sends an **explicit target state**, never a toggle. A toggle read
+  off a stale board does the opposite of what was intended, and this is the
+  control you reach for when something is already going wrong.
+- A paused board otherwise looks identical to an idle one, so the state is a
+  banner across the pane, not just a change of button label.
+
+## Runtime caps
+
+`hermes kanban create --max-runtime` sets a ceiling, and every card filed by
+hand sets one. **The decomposer sets nothing**, so its children ran uncapped —
+`t_7c57772b` ran 1h01m, satisfied its card at ~45m, then continued
+regenerating testruns nobody asked for, and stopped only because a human
+noticed.
+
+There is no config default to hook, and the dashboard's `UpdateTaskBody`
+cannot set the field, so the cap is applied by the `darkhelix-isolation` claim
+hook: if a card has no `max_runtime_seconds`, it gets one. The dispatcher's
+timeout sweep reads the task's live value each tick, so a value written at
+claim covers the run that is starting. An existing cap is never lowered.
+
+The default is 90 minutes, chosen against evidence rather than picked round:
+an engine round-trip is 3–5 minutes, the longest genuinely useful run observed
+was ~60 minutes, and the wedged runs that started this work sat at 2h+
+producing nothing. Exceeding it makes the dispatcher **requeue** the card, so
+an overrun costs a retry, not the work.
+
 ## Operating it
 
 - **Audit the whole board without side effects:**

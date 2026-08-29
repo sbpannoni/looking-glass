@@ -360,7 +360,38 @@ function renderKanban(panel, board, err){
   }
 }
 
+/* ---- global dispatch stop -------------------------------------------
+   `hermes pause` halts NEW dispatch only: the dispatcher checks it every tick
+   BEFORE spawning, in-flight workers are never killed, and cards stay `ready`
+   so resuming continues exactly where it stopped. That is the right tool for
+   "stop the pipeline" and it was previously only reachable from a shell on
+   CT111 -- so the way to stop runaway work FROM THE BOARD was to reclaim
+   cards one at a time, killing their workers and losing what they had done.
+
+   A paused board otherwise looks identical to an idle one, which is its own
+   trap, so the state is shown as a banner rather than only on the button. */
+async function refreshKanbanPause(panel){
+  const btn = panel.querySelector(".kb-pause");
+  const banner = panel.querySelector(".kb-paused-banner");
+  if(!btn || !banner) return;
+  try{
+    const r = await fetch("/api/kanban/pause");
+    const j = await r.json();
+    const paused = !!j.paused;
+    btn.dataset.paused = paused ? "1" : "";
+    btn.textContent = paused ? "▶ resume dispatch" : "⏸ pause dispatch";
+    btn.classList.toggle("on", paused);
+    banner.hidden = !paused;
+    if(paused){
+      banner.innerHTML = `<b>DISPATCH PAUSED</b> — no new workers will start. ` +
+        `In-flight work continues and cards stay ready.` +
+        (j.reason ? ` <span class="kb-paused-why">${kanbanEsc(j.reason)}</span>` : "");
+    }
+  }catch{ /* a failed state read must not disturb the board */ }
+}
+
 async function refreshKanbanPanel(panel){
+  refreshKanbanPause(panel);
   try{
     const r = await fetch("/api/kanban");
     const j = await r.json();
@@ -375,8 +406,10 @@ function openKanbanBoard(){
         <span class="kb-head-sub">click a card for its run log · ⛓ = waiting on unfinished parents · n/m = children done</span>
         <span class="kb-head-spacer"></span>
         <label class="kb-filter">assignee <select class="kb-assignee"></select></label>
+        <button class="kb-pause" type="button" title="Halt NEW dispatch. In-flight workers are never killed and cards stay ready, so resuming picks up exactly where it left off.">⏸ pause dispatch</button>
         <span class="kb-source">loading…</span>
       </div>
+      <div class="kb-paused-banner" hidden></div>
       <div class="kb-lanes"></div>`;
     panel.classList.add("kanban-pane");
 
@@ -404,6 +437,29 @@ function openKanbanBoard(){
       const card = e.target.closest(".kb-card");
       if(card) openTaskLog(card.dataset.id);
     });
+
+    const pauseBtn = panel.querySelector(".kb-pause");
+    pauseBtn.onclick = async () => {
+      // Send the explicit target state, never a toggle: a toggle read off a
+      // stale board does the opposite of what was intended, and this is the
+      // control you reach for when something is already going wrong.
+      const want = pauseBtn.dataset.paused !== "1";
+      pauseBtn.disabled = true;
+      const prev = pauseBtn.textContent;
+      pauseBtn.textContent = want ? "pausing…" : "resuming…";
+      try{
+        const r = await fetch("/api/kanban/pause", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({paused: want,
+                                reason: "paused from the Looking Glass board"}),
+        });
+        const j = await r.json();
+        if(!j.ok) pauseBtn.textContent = prev + " — failed";
+      }catch{ pauseBtn.textContent = prev + " — failed"; }
+      pauseBtn.disabled = false;
+      refreshKanbanPause(panel);
+      refreshKanbanPanel(panel);
+    };
 
     const sel = panel.querySelector(".kb-assignee");
     sel.value = kbPrefLoad(KB_ASSIGNEE_KEY, "") || "";

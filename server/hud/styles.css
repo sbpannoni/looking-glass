@@ -522,6 +522,22 @@ footer{
    collapse to a rail (see .rail) so the occupied ones keep the width — with
    five of eight statuses typically empty, that is what makes the board fit
    in the pane at all. */
+/* ---- global dispatch stop ---- */
+.kb-pause{
+  background:none; border:1px solid var(--line); border-radius:6px; color:var(--txt-dim);
+  font-family:'Rajdhani'; font-size:11px; letter-spacing:0; padding:3px 9px; cursor:pointer;
+}
+.kb-pause:hover{border-color:var(--amber); color:var(--amber)}
+.kb-pause.on{border-color:var(--amber); color:var(--amber); background:color-mix(in srgb, var(--amber) 12%, transparent)}
+.kb-pause:disabled{opacity:.5; cursor:default}
+/* A paused board looks exactly like an idle one, so say it loudly. */
+.kb-paused-banner{
+  flex:0 0 auto; margin:0 0 6px; padding:6px 10px; font-size:12px;
+  border:1px solid var(--amber); border-left-width:3px; border-radius:6px;
+  color:var(--amber); background:color-mix(in srgb, var(--amber) 10%, transparent);
+}
+.kb-paused-banner b{font-family:'Orbitron'; font-size:10px; letter-spacing:2px}
+.kb-paused-why{color:var(--txt-dim)}
 .kb-lanes{
   flex:1 1 auto; min-height:0; display:flex; gap:8px; align-items:stretch;
   overflow-x:auto; overflow-y:hidden; padding-bottom:4px;

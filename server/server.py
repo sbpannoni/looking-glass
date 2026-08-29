@@ -2445,6 +2445,60 @@ async def kanban_reclaim(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+# ------------------------------------------------------- pipeline pause
+# `hermes pause` is Hermes's own global emergency stop, and it is exactly the
+# right shape for "stop the pipeline but do not lose anything": the dispatcher
+# checks it every tick BEFORE spawning, so it takes effect on the next pass
+# with no restart, in-flight workers are never killed, and cards stay `ready`
+# so `hermes resume` picks up precisely where it left off.
+#
+# It was only reachable from a shell on CT111, which meant the way to stop
+# runaway work from the board was to reclaim cards one at a time -- killing
+# their workers and losing whatever they had done. This exposes the correct
+# tool where the runaway is actually visible.
+
+@app.get("/api/kanban/pause")
+async def kanban_pause_state() -> JSONResponse:
+    """Whether the global stop is engaged, and why."""
+    try:
+        rc, out = await _kanban_ssh(
+            "hermes status --json 2>/dev/null || hermes pause --help >/dev/null; "
+            "test -f ~/.hermes/ESTOP && cat ~/.hermes/ESTOP || echo NOTPAUSED")
+    except Exception as exc:
+        return JSONResponse({"paused": None, "error": str(exc)}, status_code=502)
+    text = (out or "").strip()
+    if "NOTPAUSED" in text or not text:
+        return JSONResponse({"paused": False})
+    reason = ""
+    try:
+        reason = (json.loads(text) or {}).get("reason") or ""
+    except Exception:
+        reason = text[:200]
+    return JSONResponse({"paused": True, "reason": reason})
+
+
+@app.post("/api/kanban/pause")
+async def kanban_pause(request: Request) -> JSONResponse:
+    """Engage or release the global stop.
+
+    Body: {"paused": true|false, "reason": "..."}. Deliberately NOT a toggle --
+    a toggle read from a stale board would do the opposite of what was
+    intended, and this is the control you reach for when something is already
+    going wrong."""
+    payload = await request.json()
+    want = bool(payload.get("paused"))
+    reason = (payload.get("reason") or "paused from the Looking Glass board").strip()
+    cmd = (f"hermes pause --reason {shlex.quote(reason[:200])}" if want
+           else "hermes resume")
+    try:
+        rc, out = await _kanban_ssh(cmd)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": out[-500:]}, status_code=502)
+    return JSONResponse({"ok": True, "paused": want, "detail": out.strip()[-300:]})
+
+
 @app.post("/api/kanban/archive")
 async def kanban_archive(request: Request) -> JSONResponse:
     """The review-then-deemphasize mechanism for a done card: archives it
