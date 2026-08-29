@@ -221,7 +221,14 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
     # Success is fully deterministic from here: pull the patch back, attach it,
     # complete the card. Runs 1 and 2 both died because a model reached this
     # point and simply never called kanban_complete.
+    # result.json reports patch_path as the container sees it ("/output/x.patch"),
+    # because the engine writes it from inside the bind mount. That path does not
+    # exist on snarf, so scp'ing it verbatim silently found nothing and the card
+    # completed with no patch attached (first real run, 2026-08-28). Map it back
+    # onto the host output dir this call actually asked for.
     patch_remote = result.get("patch_path")
+    if patch_remote and patch_remote.startswith("/output/"):
+        patch_remote = out_dir.rstrip("/") + patch_remote[len("/output"):]
     attached = None
     if patch_remote:
         os.makedirs(LOCAL_PATCHES, exist_ok=True)
@@ -238,8 +245,9 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
         else:
             attached = f"scp failed: {scp.stderr[-300:]}"
 
+    patch_ok = bool(attached) and not str(attached).startswith(("scp failed", "attach failed"))
     summary = (f"engine attempt {n} passed its test gate on {branch}; "
-               f"patch {'attached' if patch_remote else 'MISSING'}")
+               f"patch {'attached' if patch_ok else 'NOT attached'}")
     comp = subprocess.run([HERMES, "kanban", "complete", task_id, "--summary", summary],
                           capture_output=True, text=True, timeout=120)
     return _json({
@@ -248,6 +256,7 @@ def handle_dispatch_to_engine(args: Dict[str, Any], **_kw) -> str:
         "attempt": n,
         "branch": branch,
         "patch": attached,
+        "patch_attached": patch_ok,
         "card_completed": comp.returncode == 0,
         "complete_error": None if comp.returncode == 0 else comp.stderr[-300:],
         "next": ("Nothing further. The card is complete and the branch holds a "
