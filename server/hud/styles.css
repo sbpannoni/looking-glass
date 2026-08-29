@@ -591,6 +591,9 @@ footer{
    The amber glow drops away and the left rail goes red so the stuck one is
    the card that catches your eye in the running lane, not the busiest one. */
 .kb-card.live.stuck{box-shadow:none; border-left-color:var(--red)}
+/* A board whose last poll failed still shows its cards; dimming them says
+   "this may be behind" without taking the information away. */
+.kanban-pane.kb-stale .kb-lanes{opacity:.62; transition:opacity .2s ease}
 .kb-card.archived{opacity:.45}
 .kb-card.archived:hover{opacity:.8}
 .kb-title{

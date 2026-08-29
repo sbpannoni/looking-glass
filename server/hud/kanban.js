@@ -278,10 +278,33 @@ function renderKanban(panel, board, err){
   const lanesEl = panel.querySelector(".kb-lanes");
   const sourceEl = panel.querySelector(".kb-source");
   if(err){
-    lanesEl.innerHTML = `<div class="kb-board-err"><span class="err">board unavailable: ${kanbanEsc(err)}</span></div>`;
-    if(sourceEl) sourceEl.textContent = "";
+    // A failed poll must not destroy a board that is already on screen.
+    //
+    // This used to replace every lane with the error text, so one transient
+    // blip wiped the board -- and it stayed wiped until a later poll
+    // succeeded, up to 15s of showing nothing. The common cause is not the
+    // board being down at all: restarting looking-glass.service kills every
+    // in-flight fetch, and "Failed to fetch" is what the browser calls that.
+    // The board is what you watch WHILE work runs, so the last known good
+    // state is far more useful than an error where the cards were.
+    //
+    // First load is the exception: there is nothing to preserve, so the error
+    // is the only thing worth showing.
+    const hasCards = lanesEl.querySelector(".kb-card");
+    if(hasCards){
+      panel.classList.add("kb-stale");
+      if(sourceEl){
+        sourceEl.innerHTML = `<span class="warn" title="${kanbanEsc(err)}">` +
+          `last poll failed — showing the last known board, retrying</span>`;
+      }
+    }else{
+      lanesEl.innerHTML = `<div class="kb-board-err"><span class="err">board unavailable: ${kanbanEsc(err)}</span></div>`;
+      if(sourceEl) sourceEl.textContent = "";
+    }
     return;
   }
+  // Any successful render clears the stale marker.
+  panel.classList.remove("kb-stale");
   const tasks = board.tasks || [];
   const columns = (board.columns && board.columns.length)
     ? board.columns : kanbanColumnsFromTasks(tasks);
