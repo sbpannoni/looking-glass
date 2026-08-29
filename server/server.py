@@ -3433,23 +3433,41 @@ def _submission_key(title: str, body: str) -> str:
     return "lg-" + hashlib.sha256(f"{title}\n{body}".encode("utf-8")).hexdigest()[:32]
 
 
-async def _submitted_keys() -> dict[str, dict]:
-    """{submission key -> {id, status}} for every card on the board.
+async def _submitted_keys() -> tuple[dict[str, dict], dict[str, dict]]:
+    """({submission key -> card}, {card title -> card}) for the whole board.
 
     Archived cards are included on purpose: an item whose card was filed,
     finished and archived is still an item you should not be filing again.
-    Only cards created after the key was introduced carry one, so anything
-    filed before that stays unmatched -- absence here means "no evidence",
-    never "definitely not filed"."""
+
+    TWO indexes, because the key alone misses everything that matters. The
+    idempotency key is set by /api/kanban/create, so only cards filed after it
+    was introduced carry one -- and on 2026-08-28 that was six archived test
+    cards and nothing else. Every card that did real work (t_9116c28b, the
+    fabricated-panel fix; t_08aa9412, the taxor scheduler headers) predates it,
+    so both items still showed as open in SUBMIT WORK long after their fix was
+    merged to master. A tracker whose staleness check cannot see any of the
+    real work is not a tracker.
+
+    The title index closes most of that gap: SUBMIT WORK files a card whose
+    title IS the TODO item's first line, so an exact match on it identifies the
+    pairing with no key. It is weaker evidence than the key -- a hand-written
+    card title will not match, which is why t_08aa9412 ("Fix uge-taxor.sh
+    scheduler memory headers...") still cannot be paired with its item -- but
+    it is exact, not fuzzy, so it does not invent pairings either."""
     board = await _kanban_api_get(
         "/api/plugins/kanban/board?include_archived=true")
     keys: dict[str, dict] = {}
+    titles: dict[str, dict] = {}
     for column in board.get("columns") or []:
         for task in column.get("tasks") or []:
+            card = {"id": task.get("id"), "status": task.get("status")}
             key = task.get("idempotency_key")
             if key:
-                keys[key] = {"id": task.get("id"), "status": task.get("status")}
-    return keys
+                keys[key] = card
+            title = (task.get("title") or "").strip()
+            if title:
+                titles.setdefault(title, card)
+    return keys, titles
 
 
 @app.get("/api/darkhelix-todo")
@@ -3475,14 +3493,16 @@ async def darkhelix_todo() -> JSONResponse:
     # A board that can't be read costs the badges, not the picker.
     board_error = None
     try:
-        filed = await _submitted_keys()
+        filed, filed_titles = await _submitted_keys()
     except Exception as exc:
-        filed, board_error = {}, str(exc)
+        filed, filed_titles, board_error = {}, {}, str(exc)
     for item in items:
-        # Matches a submission made with no extra instructions, which is how
-        # the picker files by default. Adding notes makes a different card on
-        # purpose -- different instructions are a different request.
-        item["filed_as"] = filed.get(_submission_key(item["title"], item["text"]))
+        # Key first: it matches a submission made with no extra instructions,
+        # which is how the picker files by default. Adding notes makes a
+        # different card on purpose -- different instructions are a different
+        # request. Title second, for the cards that predate the key.
+        item["filed_as"] = (filed.get(_submission_key(item["title"], item["text"]))
+                            or filed_titles.get(item["title"].strip()))
 
     return JSONResponse({"items": items, "board_error": board_error})
 
@@ -3514,12 +3534,16 @@ _TODO_WIP_STATUSES = ("running", "ready", "review")
 
 
 def _todo_apply_board_state(text: str, items: list[dict],
-                            filed: dict[str, dict]) -> tuple[str, list[dict]]:
+                            filed: dict[str, dict],
+                            filed_titles: dict[str, dict] | None = None
+                            ) -> tuple[str, list[dict]]:
     """Return (new_text, changes) with each item's line rewritten in place."""
     lines = text.splitlines(keepends=True)
     changes: list[dict] = []
+    filed_titles = filed_titles or {}
     for item in items:
-        card = filed.get(_submission_key(item["title"], item["text"]))
+        card = (filed.get(_submission_key(item["title"], item["text"]))
+                or filed_titles.get(item["title"].strip()))
         if not card:
             continue
         idx = item.get("line")
@@ -3567,13 +3591,13 @@ async def darkhelix_todo_sync() -> JSONResponse:
     if rc != 0:
         return JSONResponse({"ok": False, "error": f"cat exited {rc}"}, status_code=502)
     try:
-        filed = await _submitted_keys()
+        filed, filed_titles = await _submitted_keys()
     except Exception as exc:
         return JSONResponse({"ok": False, "error": f"board unreadable: {exc}"},
                             status_code=502)
 
     items = _parse_darkhelix_todo(out)
-    new_text, changes = _todo_apply_board_state(out, items, filed)
+    new_text, changes = _todo_apply_board_state(out, items, filed, filed_titles)
     if not changes:
         return JSONResponse({"ok": True, "changes": [], "written": False})
 
