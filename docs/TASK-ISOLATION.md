@@ -4,6 +4,13 @@ Every kanban card that touches DARKHELIX must work in its own git worktree on
 snarf. This document says how that is guaranteed, why it is guaranteed at the
 point it is, and what happens when it fails.
 
+> **Isolation is only half the problem.** A worktree constrains *where* a worker
+> writes; nothing here verifies *what it claims to have done*. Cards have
+> reported files they never wrote, kept working after blocking themselves, and
+> relaxed the test assertion that judged them — all while perfectly isolated.
+> See [PIPELINE-VERIFICATION.md](PIPELINE-VERIFICATION.md) for those failures,
+> the fixes, and the shared-data policy that worktrees do not cover.
+
 ## The failure this prevents
 
 DARKHELIX lives at `/ssdpool/DARKHELIX` on snarf, and there is exactly one
