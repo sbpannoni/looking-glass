@@ -29,9 +29,9 @@ dead end. Fix the walls before punishing the climbing.
 
 ---
 
-## Work item E (do this first): the engine cannot run the test gate
+## Work item E — DONE (2026-08-30): the engine could not run the test gate
 
-**This is the unblocker for the whole class and it is cheap.**
+**Closed.** The mount is in `dispatch_task.py` on snarf and verified in-container.
 
 Symptom, from `t_d17fef80` attempt 3: `.venv-dev/bin/pytest doesn't exist in the
 Docker container — the symlink from the worktree to the shared checkout doesn't
@@ -41,29 +41,76 @@ The worktree symlinks `database/`, `thirdParty/`, `testData/` and `.venv-dev/` t
 `/ssdpool/DARKHELIX/...`. Inside `coder-engine:phase2` those symlinks dangle
 unless the target is mounted.
 
-The card proposed passing the absolute `/ssdpool/DARKHELIX/.venv-dev/bin/pytest`.
-**That is probably not sufficient** — if `/ssdpool` is not mounted in the
-container, an absolute path fails exactly like the symlink. Verify before
-building:
+### What the verification found
 
-```bash
-ssh sam@192.168.1.239 'grep -n "volumes\|-v \|mount" /ssdpool/coder-engine/pipeline/dispatch_task.py | head -30'
-```
+The doubt recorded here was correct. The container mounted only `repo_path`, the
+nested attempt worktree, `/output` and the git common dir — `/ssdpool/DARKHELIX`
+itself was never mounted. So the absolute path the card proposed
+(`/ssdpool/DARKHELIX/.venv-dev/bin/pytest`) fails for exactly the same reason as
+the symlink: the same missing mount, one level up. Reproduced in a container
+built with the pre-fix mount set:
 
-Fix in `dispatch_task.py` (same file as the git-common-dir mount added 2026-08-28):
-mount `/ssdpool/DARKHELIX` read-only into the container so the symlinks resolve.
-Read-only is correct and doubles as the data-policy fix below — it makes
-`database/` writable only outside the engine.
+    ls: cannot access '.venv-dev/bin/pytest': No such file or directory
 
-Then give `--test-command` a **default** in `darkhelix-engine.py`. Today it is
-passed through only when the model supplies one (`darkhelix-engine.py:174-176`),
-so each card invents its own and gets it wrong differently. A default that is
-right once is worth more than three attempts of guessing.
+### The fix
 
-Acceptance: an engine attempt on a card touching `tests/` runs the suite and
-returns a real pass/fail verdict rather than a missing-interpreter error.
+`dispatch_task.py` mounts the primary checkout **read-only** beside the existing
+read-write git-common-dir mount. It is derived, not hardcoded — `primary =
+common.parent`, guarded by `common.name == ".git"` — so a standalone or bare repo
+is skipped and nothing in the engine names DARKHELIX. The rw `common` mount is
+nested inside the ro parent and still wins, because docker applies the deeper
+destination last.
 
----
+Verified in-container after the change:
+
+| check | result |
+|---|---|
+| `.venv-dev/bin/pytest` resolves | pytest 9.1.1 |
+| full suite runs | **624 passed, 2 skipped, 37.4s** (the gate's own timeout is 120s) |
+| git still writable | `git status` ok, on `hermes/t_23a01fea` |
+| shared pool read-only | `touch` → `Read-only file system` |
+
+`git rev-parse --git-common-dir` returns `/ssdpool/DARKHELIX/.git` from every
+provisioned worktree checked, so the `.git` guard holds in practice rather than
+just in principle.
+
+Read-only is not a precaution here, it is half the point: it is the first half of
+database-policy option 1 below, and it makes an engine-side mutation of the
+gitignored `database/collab_refs/` impossible without touching what a human or a
+blocked worker can do outside the container.
+
+**No restart needed.** `darkhelix-engine.py` shells a fresh `python3
+dispatch_task.py` per attempt, so it takes effect on the next dispatch. (Plugin
+edits, unlike this one, do need the gateway restarted.)
+
+### The `--test-command` default was deliberately NOT added
+
+This item originally also asked for a default `--test-command` in
+`darkhelix-engine.py`, reasoning that "each card invents its own and gets it wrong
+differently". Once the mount exists that premise does not hold, and the change
+would be actively wrong:
+
+- the container's own `pytest` and the repo's `.venv-dev/bin/pytest` both collect
+  626 and pass 624 identically, so a default has nothing to fix;
+- `graph.py`'s `discover_test_command()` already probes with `--collect-only`
+  before trusting a command, and its docstring exists *because* a fabricated test
+  command once produced a false failure — "discovery has to be code, not model
+  free-text";
+- the tool schema already says *"Leave unset unless you know discovery picks the
+  wrong suite."*
+
+A default hardcoded on CT112, about a suite that lives on snarf, is precisely the
+guess that docstring warns against. Cards were supplying their own commands
+because the gate was broken, not because discovery was. **The mount was the whole
+of item E.**
+
+### Note for whoever commits on snarf
+
+`dispatch_task.py` carried a separate 14-line uncommitted hunk before this work
+began — it recreates the gitignored symlinks inside the *nested attempt*
+worktree, which `git worktree add` skips. It is complementary (the symlinks must
+both exist and resolve) but was unreviewed. `/ssdpool/coder-engine` is a git repo
+and both changes were still uncommitted as of 2026-08-30.
 
 ## Work item A: verify completion against the tree
 
@@ -249,9 +296,9 @@ See `hermes-plugins/README.md`.
 
 ## Suggested order
 
-1. **E** — engine test gate + read-only mount. Unblocks the class; everything
-   else is easier once cards can actually run their tests.
-2. **A** — completion verification. Cheapest real integrity win.
+1. ~~**E** — engine test gate + read-only mount.~~ **DONE 2026-08-30.**
+   Unblocked the class; cards can now actually run their tests.
+2. **A** — completion verification. Cheapest real integrity win. ← *next*
 3. **C** — make blocked terminal. Needed before any read-only enforcement.
 4. **Database policy 3** — manifest logging.
 5. **B** — parent-test gating.
