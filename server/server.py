@@ -4096,6 +4096,41 @@ async def _pool_manifest_tick() -> None:
     _dh_pool_manifest_save(files, running, event_id)
 
 
+async def _dh_pool_force_snapshot(reason: str, candidates: list[str]) -> dict:
+    """Re-hash the pool NOW and attribute the delta to a named cause.
+
+    The poller only hashes at run boundaries, which is right for workers but
+    wrong for a change the HUD itself makes: a promotion happens outside any
+    run, so the board may not move for hours and the delta would sit
+    unrecorded until it did. An unrecorded pool change is the precise thing
+    policy 3 exists to abolish, so the writer records its own."""
+    files = await _dh_pool_snapshot()
+    _DH_POOL_STATUS["snapshots"] += 1
+    prev = _DH_POOL_MANIFEST
+    if prev is None:
+        _dh_pool_manifest_save(files, [], None)
+        return {"baseline": True, "files": len(files)}
+    delta = _dh_pool_diff(prev["files"], files)
+    record = {
+        "at": time.time(), "reason": reason,
+        "window_seconds": round(time.time() - (prev.get("taken_at") or time.time())),
+        "paths": _dh_pool_paths(), "delta": delta,
+        "counts": {k: len(v) for k, v in delta.items()},
+        "candidates": sorted(candidates), "forced": True,
+    }
+    if not _dh_pool_delta_empty(delta):
+        _dh_pool_log_delta(record)
+        _DH_POOL_STATUS["deltas"] += 1
+        _DH_POOL_STATUS["recent"] = ([{
+            "at": record["at"], "counts": record["counts"],
+            "candidates": record["candidates"], "reason": reason, "forced": True,
+        }] + _DH_POOL_STATUS["recent"])[:20]
+    # Keep the boundary markers the poller reasons about; only the hashes and
+    # the timestamp are newer.
+    _dh_pool_manifest_save(files, prev.get("in_flight") or [], prev.get("event_id"))
+    return {"counts": record["counts"], "delta": delta}
+
+
 async def _poll_pool_manifest_forever() -> None:
     """Hash the shared pool at each run boundary and attribute what moved.
 
@@ -4140,6 +4175,501 @@ async def darkhelix_pool_manifest(limit: int = 20) -> JSONResponse:
         "manifest_taken_at": (_DH_POOL_MANIFEST or {}).get("taken_at"),
         "ledger": ledger,
     })
+
+
+
+# ------------------------------------------- the sanctioned write path
+# The wall this exists to avoid building.
+#
+# Item E mounts the primary checkout READ-ONLY into the engine container
+# (`-v {primary}:{primary}:ro`, dispatch_task.py:347). That is right for
+# preventing an unreviewable mutation of the shared pool -- and it also means
+# a card that legitimately needs to ADD a reference genome to
+# database/collab_refs/ cannot do it from inside the container at all. Today
+# the only route is the one t_d17fef80 took: block, then work by hand outside
+# the container. Item C closes that exit. Closing it without opening another
+# leaves a real, recurring operation with no path, and the doc is explicit
+# about what a worker does at a hard wall.
+#
+# So: a narrow rw staging area OUTSIDE the repo. A card writes proposed
+# reference files to /ssdpool/pool-staging/<task_id>/ and says so; promotion
+# into database/collab_refs/ is this explicit, reviewed step.
+#
+# Staging sits outside /ssdpool/DARKHELIX on purpose. Inside the checkout it
+# would show up in `git status`, and inside collab_refs it would register in
+# the pool manifest as an `added` file -- conflating a PROPOSAL with an actual
+# pool mutation. Out here, staging is invisible to both, and promotion is what
+# the manifest records.
+#
+# THE MOUNT IS NOT IN PLACE YET. dispatch_task.py on snarf must mount
+# POOL_STAGING_ROOT rw for a worker to be able to use this; until then these
+# endpoints serve a human staging files by hand, and item C's enforcement must
+# stay off.
+POOL_STAGING_ROOT = "/ssdpool/pool-staging"
+
+# Reference data only. This is a promotion path into a shared bioinformatics
+# pool, not a general file-drop: an extension allowlist keeps a stray script
+# or a .pyc out of collab_refs, and keeps the blast radius of the whole
+# mechanism to the kind of file it exists to move.
+_DH_PROMOTE_EXTS = {".fna", ".fa", ".fasta", ".gff", ".gff3", ".gbk", ".faa",
+                    ".tsv", ".csv", ".txt", ".json", ".yaml", ".yml", ".md"}
+
+# The pool path promotions land in, relative to DARKHELIX_REPO_PATH.
+_DH_PROMOTE_DEST = "database/collab_refs"
+
+
+def _dh_staging_dir(task_id: str) -> str:
+    root = (_dh_pool_cfg().get("pool_staging_root") or POOL_STAGING_ROOT).rstrip("/")
+    return f"{root}/{task_id}"
+
+
+def _dh_promote_name_ok(name: str) -> bool:
+    """A flat, plain filename with an allowed extension.
+
+    Names come off a `find` on the staging dir, but the caller may also pass a
+    subset, and either way they end up in a shell command and a destination
+    path. Anything with a separator, a leading dot, or an unexpected extension
+    is refused rather than sanitised -- there is no legitimate reference file
+    that needs a path component."""
+    if not name or "/" in name or name.startswith("."):
+        return False
+    if name != Path(name).name or name in (".", ".."):
+        return False
+    return Path(name).suffix.lower() in _DH_PROMOTE_EXTS
+
+
+async def _dh_staged_files(task_id: str) -> list[dict]:
+    """What is staged for one card: name, size and md5, flat, one round trip."""
+    staging = _dh_staging_dir(task_id)
+    rc, out = await _fleet_ssh(
+        "snarf",
+        f"test -d {shlex.quote(staging)} || {{ echo NODIR; exit 0; }}; "
+        f"cd {shlex.quote(staging)} && "
+        f"find . -maxdepth 1 -type f -printf '%f\\t%s\\n' 2>/dev/null | sort")
+    if rc != 0:
+        raise RuntimeError(f"staging listing failed (rc {rc}): {(out or '')[-200:]}")
+    text = (out or "").strip()
+    if not text or text == "NODIR":
+        return []
+    rows: list[dict] = []
+    for line in text.splitlines():
+        if "\t" not in line:
+            continue
+        name, _, size = line.partition("\t")
+        rows.append({"name": name, "size": int(size) if size.isdigit() else None,
+                     "eligible": _dh_promote_name_ok(name)})
+    return rows
+
+
+@app.get("/api/darkhelix/staged/{task_id}")
+async def darkhelix_staged(task_id: str) -> JSONResponse:
+    """What a card has proposed for the shared pool, and what is promotable."""
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    try:
+        files = await _dh_staged_files(task_id)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    return JSONResponse({"ok": True, "task_id": task_id,
+                         "staging": _dh_staging_dir(task_id),
+                         "destination": f"{DARKHELIX_REPO_PATH}/{_DH_PROMOTE_DEST}",
+                         "files": files,
+                         "mount_note": ("dispatch_task.py must mount this rw for a "
+                                        "worker to write here; not yet in place")})
+
+
+@app.post("/api/darkhelix/promote-refs")
+async def darkhelix_promote_refs(request: Request) -> JSONResponse:
+    """Promote a card's staged reference files into the shared pool.
+
+    The reviewed step that makes a legitimate data addition possible without
+    a worker climbing the read-only wall.
+
+    An existing file is NEVER overwritten unless `overwrite: true` is passed
+    explicitly. Replacing a reference in place is precisely what t_d17fef80
+    did to 263.fna, and it is the one operation here that can destroy
+    something, so it does not happen by default and it does not happen by
+    accident.
+
+    Copies rather than moves, and leaves staging intact: if anything about
+    the promotion turns out to be wrong, the proposal is still there. The
+    copy is verified by md5 on the far side before it is reported as done.
+    """
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    dry_run = bool(payload.get("dry_run"))
+    overwrite = bool(payload.get("overwrite"))
+
+    try:
+        staged = await _dh_staged_files(task_id)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if not staged:
+        return JSONResponse({"ok": False, "error": "nothing staged for this card",
+                             "staging": _dh_staging_dir(task_id)}, status_code=404)
+
+    available = {f["name"] for f in staged}
+    requested = payload.get("files")
+    if requested:
+        # Validate against what is actually there rather than trusting the
+        # request: a name that is not in the listing never reaches a command.
+        unknown = [n for n in requested if n not in available]
+        if unknown:
+            return JSONResponse({"ok": False, "error": f"not staged: {unknown}"},
+                                status_code=400)
+        names = [n for n in requested]
+    else:
+        names = sorted(available)
+
+    refused = [n for n in names if not _dh_promote_name_ok(n)]
+    names = [n for n in names if _dh_promote_name_ok(n)]
+    if not names:
+        return JSONResponse({"ok": False, "error": "no eligible files",
+                             "refused": refused,
+                             "allowed_extensions": sorted(_DH_PROMOTE_EXTS)},
+                            status_code=400)
+
+    staging = _dh_staging_dir(task_id)
+    dest_dir = f"{DARKHELIX_REPO_PATH}/{_DH_PROMOTE_DEST}"
+
+    # What is already there, so a clobber is reported before it happens.
+    rc, out = await _fleet_ssh(
+        "snarf", "for n in " + " ".join(shlex.quote(n) for n in names) +
+        f"; do if [ -e {shlex.quote(dest_dir)}/\"$n\" ]; then echo \"$n\"; fi; done")
+    existing = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    if existing and not overwrite:
+        return JSONResponse({
+            "ok": False, "error": "would overwrite existing pool files",
+            "existing": existing, "refused": refused,
+            "hint": "pass overwrite: true to replace them, deliberately",
+        }, status_code=409)
+
+    if dry_run:
+        return JSONResponse({"ok": True, "dry_run": True, "task_id": task_id,
+                             "would_promote": names, "would_overwrite": existing,
+                             "refused": refused, "staging": staging,
+                             "destination": dest_dir})
+
+    # Copy, then verify by md5 on the far side. `cp` to a temp name in the
+    # destination and `mv` into place keeps a reader from ever seeing a
+    # half-written reference file.
+    script_parts = [f"cd {shlex.quote(staging)} || exit 9",
+                    f"mkdir -p {shlex.quote(dest_dir)} || exit 9"]
+    for n in names:
+        q = shlex.quote(n)
+        d = shlex.quote(f"{dest_dir}/{n}")
+        script_parts.append(
+            f'cp -f -- {q} {d}.part && mv -f -- {d}.part {d} || echo "FAIL {n}"')
+    script_parts.append("echo DONE")
+    rc, out = await _fleet_ssh("snarf", "sh -c " + shlex.quote("; ".join(script_parts)))
+    failures = [ln.split(" ", 1)[1] for ln in (out or "").splitlines()
+                if ln.startswith("FAIL ")]
+    if rc != 0 or "DONE" not in (out or ""):
+        return JSONResponse({"ok": False, "error": f"promotion failed: {(out or '')[-400:]}"},
+                            status_code=502)
+
+    # Verify: the promoted file must hash the same on both sides.
+    rc, out = await _fleet_ssh(
+        "snarf",
+        f"cd {shlex.quote(staging)} && md5sum " +
+        " ".join(shlex.quote(n) for n in names) +
+        f" 2>/dev/null; cd {shlex.quote(dest_dir)} && md5sum " +
+        " ".join(shlex.quote(n) for n in names) + " 2>/dev/null")
+    hashes: dict[str, list[str]] = {}
+    for line in (out or "").splitlines():
+        if "  " not in line:
+            continue
+        digest, _, name = line.partition("  ")
+        hashes.setdefault(name.strip(), []).append(digest)
+    verified = [n for n in names
+                if len(hashes.get(n, [])) == 2 and len(set(hashes[n])) == 1]
+    mismatched = [n for n in names if n not in verified]
+
+    result = {"ok": not mismatched and not failures, "task_id": task_id,
+              "promoted": verified, "failed": failures + mismatched,
+              "refused": refused, "overwrote": existing,
+              "staging": staging, "destination": dest_dir}
+
+    # Record it in the pool ledger straight away. A promotion happens outside
+    # any run boundary, so the manifest poller would not otherwise re-hash
+    # until the next board event -- and an unrecorded pool change is the exact
+    # thing policy 3 exists to abolish.
+    if verified:
+        try:
+            result["ledger"] = await _dh_pool_force_snapshot(
+                reason=f"promotion from {staging}", candidates=[task_id])
+        except Exception as exc:
+            result["ledger_error"] = str(exc)[:200]
+        try:
+            await asyncio.to_thread(
+                _kanban_api_call, "POST",
+                f"/api/plugins/kanban/tasks/{quote(task_id)}/comments",
+                json={"author": "looking-glass", "body":
+                      "**Promoted to the shared pool.**\n\n"
+                      + "\n".join(f"  - `{_DH_PROMOTE_DEST}/{n}`" for n in verified)
+                      + (f"\n\nReplaced existing: {', '.join(existing)}" if existing else "")
+                      + "\n\nCopied from staging and md5-verified on the far side. "
+                        "The staged copies were left in place."})
+        except Exception as exc:
+            result["comment_error"] = str(exc)[:200]
+
+    return JSONResponse(result, status_code=200 if result["ok"] else 502)
+
+
+
+# ------------------------------------------------ making "blocked" terminal
+# Work item C. `t_d17fef80` blocked itself at 20:45 -- correctly -- and then
+# went on working by hand until 23:59, mutating the shared pool. Blocking
+# recorded a state and changed nothing about what the worker could still do.
+#
+# THE LEVER. `hermes kanban reclaim` looks like the tool for this and is not:
+# `reclaim_task` (kanban_db.py:4600) welds two separable things together --
+# `_terminate_reclaimed_worker(worker_pid, claim_lock)`, which SIGTERMs then
+# SIGKILLs a host-local worker, and an `UPDATE ... SET status='ready'`. Only
+# the kill is wanted. `ready` is DISPATCHABLE, so reclaiming a card the worker
+# just blocked would immediately re-dispatch it.
+#
+# Hermes is vendor software and is configured, not patched -- but the kill
+# half needs no patch, because both of its inputs are already on the plugin
+# API's task detail: `worker_pid`, and `claim_lock` in the form
+# "{hostname}:{pid}" (`_claimer_id()`, kanban_db.py:2858; the hostname on
+# CT111 is `hermes`). So the HUD makes the same host-locality check Hermes
+# makes and sends the same signals, and simply never touches the status.
+#
+# WHY LEAVING IT BLOCKED IS SAFE -- both checked in the Hermes source:
+#   - a claim is only ever taken on `status='ready'` (kanban_db.py:4295), so
+#     a blocked card is not dispatchable;
+#   - a worker's own `kanban_block` emits a `blocked` EVENT, which makes
+#     `_has_sticky_block()` true, and `recompute_ready` explicitly refuses to
+#     auto-promote a sticky-blocked card (kanban_db.py:4177). Only an explicit
+#     `unblock` exits. Stickiness comes from the event, not from `--kind`, so
+#     any deliberate block qualifies while circuit-breaker blocks (which emit
+#     `gave_up`, not `blocked`) keep their auto-recovery.
+#
+# SHIPPED OFF. `darkhelix.enforce_block` defaults false. Enforcement must not
+# precede the sanctioned write path: the engine mounts the primary checkout
+# read-only (dispatch_task.py:347), so a card that legitimately needs to add a
+# reference genome CANNOT do it inside the container, and doing it by hand
+# after blocking is currently the only route there is. Closing that exit
+# before /ssdpool/pool-staging is mounted rw would leave no path at all --
+# "fix the walls before punishing the climbing". Turn this on after the mount.
+_DH_BLOCK_HANDLED_MAX = 500
+_DH_BLOCK_STATE: dict = {"seeded": False, "handled": []}
+_DH_BLOCK_STATUS: dict = {
+    "enabled": False, "seeded": False, "last_tick": None, "last_error": None,
+    "note": None, "killed": 0, "recent": [],
+}
+BLOCK_STATE_PATH = ROOT / "logs" / "enforce_blocks.json"
+
+
+def _dh_block_cfg() -> dict:
+    return CFG.get("darkhelix") or {}
+
+
+def _dh_block_poll_seconds() -> int:
+    return int(_dh_block_cfg().get("enforce_block_poll_seconds") or 60)
+
+
+def _dh_block_state_load() -> None:
+    global _DH_BLOCK_STATE
+    try:
+        data = json.loads(BLOCK_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if isinstance(data, dict) and isinstance(data.get("handled"), list):
+        _DH_BLOCK_STATE = {"seeded": bool(data.get("seeded")),
+                           "handled": [str(i) for i in data["handled"]][-_DH_BLOCK_HANDLED_MAX:]}
+
+
+def _dh_block_state_save() -> None:
+    try:
+        BLOCK_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        BLOCK_STATE_PATH.write_text(json.dumps(_DH_BLOCK_STATE), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _dh_block_mark(task_id: str) -> None:
+    handled = _DH_BLOCK_STATE["handled"]
+    if task_id in handled:
+        return
+    handled.append(task_id)
+    del handled[:-_DH_BLOCK_HANDLED_MAX]
+
+
+async def _dh_kanban_hostname() -> str:
+    """The hostname CT111 stamps into `claim_lock`. Read, never assumed --
+    a wrong guess here would make every claim look remote and silently
+    disable enforcement."""
+    rc, out = await _kanban_ssh("hostname")
+    return (out or "").strip().splitlines()[-1].strip() if rc == 0 and out else ""
+
+
+async def _dh_terminate_worker(task_id: str, pid: int) -> dict:
+    """SIGTERM, wait, SIGKILL -- but only if the pid really is this card's
+    Hermes worker.
+
+    The pid comes off a board row that may be stale, and the OS recycles
+    pids. Killing a recycled pid would kill an unrelated process, so the
+    identity check and the signal happen in ONE ssh command: checking from
+    here and signalling in a second round trip is a race with exactly that
+    failure mode. /proc/<pid>/cmdline must name hermes AND this task."""
+    script = (
+        f'p={int(pid)}; '
+        f'test -r /proc/$p/cmdline || {{ echo GONE; exit 0; }}; '
+        f'cl=$(tr "\\0" " " < /proc/$p/cmdline); '
+        f'case "$cl" in *hermes*) ;; *) echo NOTHERMES; exit 3;; esac; '
+        f'case "$cl" in *{shlex.quote(task_id)}*) ;; *) echo WRONGTASK; exit 4;; esac; '
+        f'kill -TERM $p 2>/dev/null || {{ echo GONE; exit 0; }}; '
+        f'for i in $(seq 20); do kill -0 $p 2>/dev/null || {{ echo TERMED; exit 0; }}; sleep 0.5; done; '
+        f'kill -KILL $p 2>/dev/null; sleep 1; '
+        f'kill -0 $p 2>/dev/null && echo SURVIVED || echo KILLED'
+    )
+    try:
+        rc, out = await _kanban_ssh(f"sh -c {shlex.quote(script)}")
+    except Exception as exc:
+        return {"ok": False, "outcome": "ssh-failed", "error": str(exc)[:200]}
+    token = (out or "").strip().splitlines()[-1].strip() if out else ""
+    return {"ok": token in ("TERMED", "KILLED", "GONE"), "outcome": token or f"rc{rc}"}
+
+
+async def _dh_enforce_block(task_id: str, dry_run: bool = False) -> dict:
+    """End the run behind one blocked card. The card's status is never touched."""
+    if not _TASK_ID_RE.match(task_id or ""):
+        return {"ok": False, "error": "bad task id"}
+    try:
+        detail = await _kanban_task_detail(task_id)
+    except Exception as exc:
+        return {"ok": False, "error": f"task lookup failed: {exc}"}
+    task = detail.get("task") or {}
+    if (task.get("status") or "") != "blocked":
+        return {"ok": True, "outcome": "skipped",
+                "why": f"status is {task.get('status')!r}, not blocked"}
+
+    lock = task.get("claim_lock")
+    pid = task.get("worker_pid")
+    if not lock or not pid:
+        # The normal case for a card blocked long ago: the claim is already
+        # released, so there is no run left to end.
+        return {"ok": True, "outcome": "no-live-claim",
+                "claim_lock": lock, "worker_pid": pid}
+
+    host = await _dh_kanban_hostname()
+    if not host:
+        return {"ok": False, "error": "could not read the kanban host's hostname"}
+    if not str(lock).startswith(f"{host}:"):
+        # Same guard Hermes applies. Signalling across hosts is not possible
+        # from here and guessing would be worse than declining.
+        return {"ok": True, "outcome": "remote-claim", "claim_lock": lock}
+
+    if dry_run:
+        return {"ok": True, "outcome": "would-terminate",
+                "worker_pid": pid, "claim_lock": lock, "dry_run": True}
+
+    result = await _dh_terminate_worker(task_id, int(pid))
+    result.update({"worker_pid": pid, "claim_lock": lock, "task_id": task_id})
+    if result.get("ok") and result.get("outcome") != "GONE":
+        try:
+            await asyncio.to_thread(
+                _kanban_api_call, "POST",
+                f"/api/plugins/kanban/tasks/{quote(task_id)}/comments",
+                json={"author": "looking-glass", "body":
+                      "**Run ended.** This card blocked itself while its worker "
+                      f"was still running (pid {pid}); the worker was terminated "
+                      "so that blocking actually stops work rather than only "
+                      "recording a state.\n\nThe card's status was deliberately "
+                      "left at `blocked` — it is not requeued, and `unblock` is "
+                      "the only way out."})
+        except Exception as exc:
+            result["comment_error"] = str(exc)[:200]
+    return result
+
+
+async def _enforce_blocks_tick() -> None:
+    board = await _kanban_api_get("/api/plugins/kanban/board")
+    rows = [t for c in (board.get("columns") or []) for t in (c.get("tasks") or [])]
+    blocked = [t["id"] for t in rows
+               if t.get("id") and (t.get("status") or "") == "blocked"]
+
+    if not _DH_BLOCK_STATE["seeded"]:
+        # Same reasoning as the verification sweep: the cards already sitting
+        # in the blocked lane had their runs end long ago. Their `worker_pid`
+        # is stale, and a stale pid is the one thing that must never be
+        # signalled. Seed, act on nothing.
+        for task_id in blocked:
+            _dh_block_mark(task_id)
+        _DH_BLOCK_STATE["seeded"] = True
+        _dh_block_state_save()
+        _DH_BLOCK_STATUS["seeded"] = True
+        _DH_BLOCK_STATUS["note"] = (
+            f"seeded {len(blocked)} already-blocked card(s) without signalling "
+            "anything; enforcement applies to blocks from here on")
+        return
+
+    handled = set(_DH_BLOCK_STATE["handled"])
+    for task_id in [t for t in blocked if t not in handled]:
+        result = await _dh_enforce_block(task_id)
+        if not result.get("ok"):
+            _DH_BLOCK_STATUS["recent"] = ([{
+                "task_id": task_id, "outcome": "error",
+                "error": result.get("error"), "at": time.time(),
+            }] + _DH_BLOCK_STATUS["recent"])[:20]
+            continue
+        _dh_block_mark(task_id)
+        outcome = result.get("outcome")
+        if outcome in ("TERMED", "KILLED"):
+            _DH_BLOCK_STATUS["killed"] += 1
+        _DH_BLOCK_STATUS["recent"] = ([{
+            "task_id": task_id, "outcome": outcome,
+            "worker_pid": result.get("worker_pid"), "at": time.time(),
+        }] + _DH_BLOCK_STATUS["recent"])[:20]
+    _dh_block_state_save()
+
+
+async def _poll_enforce_blocks_forever() -> None:
+    """Make blocking terminal: end the run behind a card that blocked itself.
+
+    OFF by default. See the module note above -- this must not be enabled
+    before the sanctioned staging path exists, or a card needing to add a
+    reference genome is left with no route at all."""
+    if not _dh_block_cfg().get("enforce_block"):
+        return
+    _dh_block_state_load()
+    _DH_BLOCK_STATUS["enabled"] = True
+    _DH_BLOCK_STATUS["seeded"] = _DH_BLOCK_STATE["seeded"]
+    while True:
+        try:
+            await _enforce_blocks_tick()
+            _DH_BLOCK_STATUS["last_error"] = None
+        except Exception as exc:
+            _DH_BLOCK_STATUS["last_error"] = str(exc)[:300]
+        _DH_BLOCK_STATUS["last_tick"] = time.time()
+        await asyncio.sleep(_dh_block_poll_seconds())
+
+
+@app.get("/api/kanban/enforce-block")
+async def kanban_enforce_block_status() -> JSONResponse:
+    return JSONResponse({**_DH_BLOCK_STATUS,
+                         "handled_count": len(_DH_BLOCK_STATE["handled"]),
+                         "poll_seconds": _dh_block_poll_seconds()})
+
+
+@app.post("/api/kanban/enforce-block")
+async def kanban_enforce_block(request: Request) -> JSONResponse:
+    """End one blocked card's run by hand.
+
+    Works whether or not the poller is enabled, and `dry_run` reports what
+    would be signalled without sending anything -- which is how to check the
+    lever against a live card before turning enforcement on."""
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    result = await _dh_enforce_block(task_id, dry_run=bool(payload.get("dry_run")))
+    status = 200 if result.get("ok") else 502
+    if result.get("error") == "bad task id":
+        status = 400
+    return JSONResponse(result, status_code=status)
 
 
 
@@ -4878,6 +5408,7 @@ async def start_activity_feed() -> None:
     asyncio.get_running_loop().create_task(_poll_network_topology_forever())
     asyncio.get_running_loop().create_task(_verify_completions_forever())
     asyncio.get_running_loop().create_task(_poll_pool_manifest_forever())
+    asyncio.get_running_loop().create_task(_poll_enforce_blocks_forever())
 
 
 async def _poll_rack_hosts_forever() -> None:

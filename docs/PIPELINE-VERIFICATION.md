@@ -268,6 +268,106 @@ invisibly.
 
 ---
 
+### Status 2026-08-30: the lever is found and built; enforcement stays OFF
+
+**`hermes kanban reclaim` is not the lever, and this is why.** `reclaim_task`
+(`kanban_db.py:4600`) welds two separable operations together:
+`_terminate_reclaimed_worker(worker_pid, claim_lock)` — SIGTERM, poll, SIGKILL
+— and `UPDATE tasks SET status='ready'`. Only the kill is wanted. `ready` is
+**dispatchable**, so reclaiming a card the worker just blocked would
+immediately re-dispatch it.
+
+**The kill half needs no Hermes patch.** Both of its inputs are already on the
+plugin API's task detail: `worker_pid`, and `claim_lock` in the form
+`"{hostname}:{pid}"` (`_claimer_id()`, `kanban_db.py:2858`; the hostname on
+CT111 is `hermes`). So the HUD makes the same host-locality check Hermes makes,
+sends the same signals, and never touches the status. Hermes stays configured,
+not patched.
+
+**Leaving the card blocked is safe — both checked in the source:**
+
+- a claim is only ever taken on `status='ready'` (`kanban_db.py:4295`), so a
+  blocked card is not dispatchable;
+- a worker's own `kanban_block` emits a `blocked` **event**, which makes
+  `_has_sticky_block()` true, and `recompute_ready` explicitly refuses to
+  auto-promote a sticky-blocked card (`kanban_db.py:4177`). Only an explicit
+  `unblock` exits. Stickiness comes from the event, not from `--kind`, so any
+  deliberate block qualifies — while circuit-breaker blocks, which emit
+  `gave_up` rather than `blocked`, keep their auto-recovery.
+
+Built as `_dh_enforce_block()` + `_poll_enforce_blocks_forever()` +
+`GET`/`POST /api/kanban/enforce-block` (`dry_run` supported). The identity
+check and the signal are **one** ssh command — `/proc/<pid>/cmdline` must name
+both `hermes` and this task id — because a `worker_pid` off a board row can be
+stale and the OS recycles pids; checking from here and signalling in a second
+round trip is a race with exactly that failure mode. The poller also seeds the
+existing blocked lane without signalling anything, for the same reason.
+
+#### Why it ships disabled: item C alone would make things worse
+
+Item E mounts the primary checkout **read-only** into the engine container
+(`-v {primary}:{primary}:ro`, `dispatch_task.py:347`). That is correct for
+preventing unreviewable pool mutation — and it also means **a card that
+legitimately needs to add a reference genome to `database/collab_refs/` cannot
+do it from inside the container at all.** Adding references is a real,
+recurring operation, not a hypothetical.
+
+So today the only route for a legitimate addition is the one `t_d17fef80`
+took: block, then work by hand outside the container. Item C closes that exit.
+Closing it before another one is open leaves a real operation with **no path**,
+which is this document's own warning — *fix the walls before punishing the
+climbing*.
+
+`darkhelix.enforce_block` therefore defaults to `false` and must stay false
+until the staging mount below is in place.
+
+#### The sanctioned write path
+
+A narrow rw staging area **outside** the repo: `/ssdpool/pool-staging/<task_id>/`
+(`darkhelix.pool_staging_root`). A card writes proposed reference files there
+and says so; promotion into `database/collab_refs/` is an explicit reviewed
+step.
+
+Staging sits outside `/ssdpool/DARKHELIX` deliberately. Inside the checkout it
+would show up in `git status`; inside `collab_refs` it would register in the
+pool manifest as an `added` file, conflating a **proposal** with an actual pool
+mutation. Out here staging is invisible to both, and the *promotion* is what
+the manifest records.
+
+Built HUD-side as `GET /api/darkhelix/staged/<task_id>` and
+`POST /api/darkhelix/promote-refs` (`dry_run`, `files`, `overwrite`):
+
+- an existing pool file is **never** overwritten unless `overwrite: true` is
+  passed — replacing a reference in place is exactly what happened to
+  `263.fna`, and it is the one operation here that can destroy something;
+- names must be plain files with a reference-data extension; a request may
+  select a subset, but every name is validated against the actual staging
+  listing, so a name from the request never reaches a shell command;
+- it copies rather than moves and leaves staging intact, then verifies by md5
+  on the far side before reporting success;
+- it forces a pool-manifest snapshot attributed to the promoting card, because
+  a promotion happens outside any run boundary and the poller would otherwise
+  not re-hash until the next board event.
+
+**This resolves the doc's own choice between designs (1) and (2) above.** (2)
+was preferred only because the improvisation was often *right*. A sanctioned
+in-run write path makes that same correct work a normal operation, which makes
+(1) — blocking simply ends the run — safe to enforce.
+
+#### Remaining work, on snarf
+
+1. `mkdir /ssdpool/pool-staging` and mount it **rw** into the engine container
+   in `/ssdpool/coder-engine/pipeline/dispatch_task.py`, beside the existing
+   `:ro` primary mount. That repo is snarf's, not CT112's.
+2. Tell the worker the path exists — it needs to know that adding a reference
+   means writing to `/ssdpool/pool-staging/<task_id>/` and saying so, not
+   trying to write the pool directly.
+3. Then set `darkhelix.enforce_block: true` on CT112.
+
+Do them in that order. Step 3 before steps 1–2 rebuilds the hard wall.
+
+---
+
 ## Work item D: stop charging attempts for environmental faults
 
 `MAX_ATTEMPTS = 3` (`darkhelix-engine.py:71`) counts attempts but not their kind.
@@ -435,16 +535,11 @@ See `hermes-plugins/README.md`.
    Unblocked the class; cards can now actually run their tests.
 2. ~~**A** — completion verification.~~ **DONE 2026-08-30.** Implemented and
    firing automatically; the board stops lying without anyone asking it to.
-3. **C** — make blocked terminal. ← *next*. Note the stated prerequisite
-   ("needed before any read-only enforcement") is for database policy **1**,
-   which is explicitly not the plan; policy 3 above now DETECTS the
-   post-block improvisation C would prevent, so C is about enforcement, not
-   visibility. Its open question: enforcement cannot live in Hermes (vendor
-   software, configured not patched), and the obvious lever —
-   `hermes kanban reclaim`, already exposed by the HUD, which does kill a
-   host-local worker — also sets the card to `ready`, which is dispatchable.
-   Using it to enforce a block would immediately re-dispatch the card just
-   blocked. Resolve that before building.
+3. **C** — make blocked terminal. **Lever found, HUD half built, shipped
+   OFF.** The blocker is no longer design: it is that the read-only engine
+   mount leaves a legitimate reference addition with no path, so enforcement
+   must wait on the staging mount landing on snarf. ← *next action is on
+   snarf*, see item C's "Remaining work" above.
 4. ~~**Database policy 3** — manifest logging.~~ **DONE 2026-08-30.** Every
    mutation of the shared pool is now attributable, and one that belongs to
    nobody is flagged as such.
