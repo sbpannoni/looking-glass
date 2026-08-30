@@ -4,8 +4,14 @@ sanctioned write path).
 
 RUN THIS ON SNARF:  python3 snarf-pool-staging-mount.py
 
-Patches /ssdpool/coder-engine/pipeline/dispatch_task.py (backing it up first)
-and creates /ssdpool/pool-staging. Idempotent: re-running is a no-op.
+Ensures /ssdpool/pool-staging exists and is writable, THEN patches
+/ssdpool/coder-engine/pipeline/dispatch_task.py (backing it up first).
+Idempotent: re-running is a no-op. Either check failing aborts before anything
+is modified.
+
+/ssdpool is root-owned, so the staging root usually has to be created with
+sudo once; the script prints the exact command and changes nothing if it
+cannot create it itself.
 
 Why: the primary checkout is mounted READ-ONLY into the container, so a card
 that legitimately needs to ADD a reference genome to database/collab_refs/ has
@@ -13,11 +19,12 @@ nowhere to put it, and the only remaining route is to block and work by hand
 outside the container -- exactly what t_d17fef80 did. This is the replacement.
 See docs/PIPELINE-VERIFICATION.md item C in the looking-glass repo.
 
-After this lands, set darkhelix.enforce_block: true on CT112 and restart
-looking-glass.service. Not before -- enforcement without this rebuilds the
-hard wall.
+Ordering matters: darkhelix.enforce_block on CT112 must not be enabled until
+this has landed, or a legitimate reference addition has no path at all.
+(Enabled 2026-08-30, after this landed and was verified in-container.)
 """
 import ast
+import getpass
 import time
 from pathlib import Path
 
@@ -62,6 +69,41 @@ MOUNT_ADD = '''        # SANCTIONED WRITE PATH into the shared reference pool.
 
 
 def main() -> int:
+    # PRECONDITION FIRST, PATCH SECOND.
+    #
+    # This used to patch and then mkdir, which is backwards: /ssdpool is
+    # root-owned, so the mkdir fails for the unprivileged user the engine
+    # dispatches as, and the earlier ordering left a patched dispatch_task.py
+    # pointing at a directory that does not exist, plus a traceback. Establish
+    # the thing the patch depends on before making the patch.
+    if not STAGING_ROOT.is_dir():
+        try:
+            STAGING_ROOT.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            user = getpass.getuser()
+            print(f"ABORT: cannot create {STAGING_ROOT} as {user}: {exc}")
+            print(f"  {STAGING_ROOT.parent} is not writable by {user}. Create it")
+            print("  first, owned by the user the engine dispatches as:")
+            print(f"    sudo install -d -o {user} -g {user} -m 2775 {STAGING_ROOT}")
+            print("  then re-run. NOTHING HAS BEEN CHANGED.")
+            return 1
+
+    # Existing is not the precondition -- writable is. dispatch_task.py mkdirs
+    # a per-card subdirectory on every attempt, so a staging root the engine
+    # cannot write to would fail every dispatch rather than failing here.
+    probe = STAGING_ROOT / ".write-probe"
+    try:
+        probe.mkdir(exist_ok=True)
+        probe.rmdir()
+    except OSError as exc:
+        user = getpass.getuser()
+        print(f"ABORT: {STAGING_ROOT} exists but {user} cannot write to it: {exc}")
+        print("  Every dispatch would fail. Fix ownership:")
+        print(f"    sudo chown {user} {STAGING_ROOT} && sudo chmod 2775 {STAGING_ROOT}")
+        print("  then re-run. NOTHING HAS BEEN CHANGED.")
+        return 1
+    print(f"staging root ready and writable: {STAGING_ROOT}")
+
     src = TARGET.read_text()
     if "POOL_STAGING_ROOT" in src:
         print("already patched; nothing to do")
@@ -81,11 +123,9 @@ def main() -> int:
         TARGET.write_text(out)
         print(f"patched {TARGET} (backup: {backup.name})")
 
-    STAGING_ROOT.mkdir(parents=True, exist_ok=True)
-    print(f"staging root ready: {STAGING_ROOT}")
     print("\nNo engine restart needed -- darkhelix-engine.py shells a fresh")
     print("dispatch_task.py per attempt, so this takes effect on the next dispatch.")
-    print("\nNext: set darkhelix.enforce_block: true on CT112 and restart the HUD.")
+    print("\nCommit the change in /ssdpool/coder-engine; that repo is snarf's.")
     return 0
 
 

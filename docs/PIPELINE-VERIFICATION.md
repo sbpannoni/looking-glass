@@ -362,17 +362,43 @@ in-run write path makes that same correct work a normal operation, which makes
    now states that the pool is read-only in the container, names
    `/ssdpool/pool-staging/<task_id>/` and `$POOL_STAGING`, and says to record
    the files in the summary.
-2. **On snarf** — mount the staging area rw. Run
-   `scripts/snarf-pool-staging-mount.py` **on snarf**: it patches
+2. ~~**On snarf** — mount the staging area rw.~~ **DONE 2026-08-30** via
+   `scripts/snarf-pool-staging-mount.py`, which patches
    `/ssdpool/coder-engine/pipeline/dispatch_task.py` beside the existing `:ro`
-   primary mount (backing it up first, refusing to write a file that does not
-   parse) and creates `/ssdpool/pool-staging`. Idempotent. No engine restart
-   needed — `darkhelix-engine.py` shells a fresh `dispatch_task.py` per
-   attempt. That repo is snarf's, not CT112's, so the change is committed
-   there.
-3. Then set `darkhelix.enforce_block: true` on CT112 and restart the HUD.
+   primary mount. No engine restart needed — `darkhelix-engine.py` shells a
+   fresh `dispatch_task.py` per attempt.
 
-Do them in that order. Step 3 before step 2 rebuilds the hard wall.
+   **Verified in a real container** with the production mount set: a write to
+   `$POOL_STAGING` succeeds, and `touch database/collab_refs/evil.fna` still
+   fails `Read-only file system`. The sanctioned path was then exercised end
+   to end against a real staged file — a `.fna` listed eligible and
+   would-promote, a `.sh` refused by the extension rule, nothing overwritten.
+
+   *The script had an ordering bug, caught by the Claude on snarf and fixed:*
+   it patched `dispatch_task.py` and only then created the staging root.
+   `/ssdpool` is root-owned, so that `mkdir` fails for the unprivileged user
+   the engine dispatches as, leaving a patched engine pointing at a directory
+   that does not exist. It now establishes and write-probes the staging root
+   **first**, aborting having changed nothing and printing the
+   `sudo install -d` command to run. Existing is not the precondition —
+   *writable* is, because `dispatch_task.py` mkdirs a per-card subdirectory on
+   every attempt.
+
+   That repo is snarf's, not CT112's, so the change is committed there.
+3. ~~Then set `darkhelix.enforce_block: true` on CT112 and restart the HUD.~~
+   **DONE 2026-08-30**, after step 2 landed and was verified.
+
+The ordering was the point: step 3 before step 2 would have rebuilt the hard
+wall. `test_shipped_config_never_enforces_without_a_staging_path` now holds
+that invariant open — enforcement is permitted only while a staging root is
+configured.
+
+**Not yet exercised against a live worker.** There were no running or blocked
+cards holding a claim, so the kill path is covered by unit tests and a dry run,
+not a real termination. `POST /api/kanban/enforce-block` with `dry_run` against
+the first card that blocks itself will confirm `worker_pid` and `claim_lock`
+read correctly before the automatic path is trusted. The poller seeds the
+existing blocked lane without signalling, so nothing fires retroactively.
 
 ---
 
@@ -543,11 +569,10 @@ See `hermes-plugins/README.md`.
    Unblocked the class; cards can now actually run their tests.
 2. ~~**A** — completion verification.~~ **DONE 2026-08-30.** Implemented and
    firing automatically; the board stops lying without anyone asking it to.
-3. **C** — make blocked terminal. **Lever found, HUD half built, shipped
-   OFF.** The blocker is no longer design: it is that the read-only engine
-   mount leaves a legitimate reference addition with no path, so enforcement
-   must wait on the staging mount landing on snarf. ← *next action is on
-   snarf*, see item C's "Remaining work" above.
+3. ~~**C** — make blocked terminal.~~ **DONE 2026-08-30.** Enforcement is on,
+   and it shipped with the sanctioned write path rather than ahead of it, so
+   a card that needs to add a reference genome has somewhere to put it. Not
+   yet exercised against a live worker — see item C's "Remaining work".
 4. ~~**Database policy 3** — manifest logging.~~ **DONE 2026-08-30.** Every
    mutation of the shared pool is now attributable, and one that belongs to
    nobody is flagged as such.
