@@ -3826,6 +3826,323 @@ async def kanban_verify_completion_status() -> JSONResponse:
 
 
 
+# --------------------------------------------- shared-pool manifest logging
+# Database policy option 3 from docs/PIPELINE-VERIFICATION.md.
+#
+# `database/` is gitignored and symlinked into every worktree from the one
+# copy at /ssdpool/DARKHELIX. A worker mutating it leaves NO diff, no review
+# and nothing to revert: when t_d17fef80 replaced 263.fna and deleted 234.fna,
+# the only reason anyone found out was a human computing md5s days later.
+# Code isolation is solved; data isolation is not, and copying cannot solve it.
+#
+# This is the detective half: hash the pool at every run boundary and attribute
+# the delta to whoever was running. It is deliberately NOT preventive -- a
+# read-only pool (option 1) without item C makes things worse, and we have
+# direct evidence of what a worker does at a hard wall.
+#
+# WHY NOT THE WHOLE OF database/, AND WHY NOT A PLUGIN
+# ----------------------------------------------------
+# `database/` is 582G across ~154k files. Hashing that per run is not viable.
+# `database/collab_refs/` is 184M across 158 files and md5s in 1.9s, and it is
+# both what the doc names and what actually got damaged. Measured on snarf
+# 2026-08-30. More paths can be added via config; the cost is linear and the
+# guard below refuses an accidentally enormous one.
+#
+# The doc proposed putting this in `darkhelix-isolation`. It cannot live there
+# whole: that plugin hooks `kanban_task_claimed`, which fires in the DISPATCHER
+# and would give the BEFORE snapshot -- but the AFTER snapshot needs the run to
+# end, and `kanban_task_completed` fires in the WORKER, under its own profile,
+# where the plugin is not enabled. That is exactly the trap item A documented.
+# Worse, a completion hook would miss every run that ends by blocking, crashing
+# or being reclaimed, which is most of the interesting ones. A boundary poller
+# on the HUD sees all of them.
+POOL_MANIFEST_PATH = ROOT / "logs" / "pool_manifest.json"
+POOL_DELTA_LOG = ROOT / "logs" / "pool_deltas.jsonl"
+
+_DH_POOL_DEFAULT_PATHS = ("database/collab_refs",)
+
+# A guard against a config typo pointing this at 582G. Refuse rather than
+# spend an hour hashing: a manifest that never completes logs nothing.
+_DH_POOL_MAX_FILES = 20000
+
+# Enough to read; a delta of thousands of files is a catastrophe, not a diff,
+# and the count still tells that story.
+_DH_POOL_LIST_CAP = 40
+
+_DH_POOL_MANIFEST: dict | None = None
+_DH_POOL_STATUS: dict = {
+    "enabled": False, "baseline": False, "last_tick": None, "last_error": None,
+    "note": None, "snapshots": 0, "windows_clean": 0, "deltas": 0, "recent": [],
+}
+
+
+def _dh_pool_cfg() -> dict:
+    return CFG.get("darkhelix") or {}
+
+
+def _dh_pool_paths() -> list[str]:
+    raw = _dh_pool_cfg().get("pool_manifest_paths") or _DH_POOL_DEFAULT_PATHS
+    # Repo-relative only: an absolute path or a `..` escape would hash
+    # something outside the pool this is supposed to be accounting for.
+    return [p for p in (str(x).strip().strip("/") for x in raw)
+            if p and not p.startswith("/") and ".." not in p.split("/")]
+
+
+def _dh_pool_poll_seconds() -> int:
+    return int(_dh_pool_cfg().get("pool_manifest_poll_seconds") or 120)
+
+
+async def _dh_pool_snapshot() -> dict[str, str]:
+    """md5 of every file under the watched paths, as {relative path: md5}.
+
+    One ssh round trip. `sort -z` before md5sum keeps the command's output
+    order stable so a diff of two snapshots is about content, not readdir
+    order."""
+    paths = _dh_pool_paths()
+    if not paths:
+        return {}
+    quoted = " ".join(shlex.quote(p) for p in paths)
+    rc, out = await _fleet_ssh(
+        "snarf",
+        f"cd {shlex.quote(DARKHELIX_REPO_PATH)} && "
+        f"timeout 600 sh -c {shlex.quote(f'find {quoted} -type f -print0 | sort -z | xargs -0 -r md5sum')}")
+    if rc != 0:
+        raise RuntimeError(f"pool snapshot failed (rc {rc}): {(out or '')[-300:]}")
+    files: dict[str, str] = {}
+    for line in (out or "").splitlines():
+        # md5sum prints "<32 hex>  <path>"; it prefixes the line with a
+        # backslash when it had to escape the name. Those are skipped rather
+        # than mis-parsed -- a filename with a newline in this pool would be
+        # its own incident.
+        if line.startswith("\\") or "  " not in line:
+            continue
+        digest, _, path = line.partition("  ")
+        if len(digest) == 32:
+            files[path] = digest
+    if len(files) > _DH_POOL_MAX_FILES:
+        raise RuntimeError(
+            f"pool manifest refuses {len(files)} files (cap {_DH_POOL_MAX_FILES}); "
+            f"check darkhelix.pool_manifest_paths")
+    return files
+
+
+def _dh_pool_diff(old: dict[str, str], new: dict[str, str]) -> dict:
+    old_keys, new_keys = set(old), set(new)
+    return {
+        "added": sorted(new_keys - old_keys),
+        "removed": sorted(old_keys - new_keys),
+        "changed": sorted(p for p in (old_keys & new_keys) if old[p] != new[p]),
+    }
+
+
+def _dh_pool_delta_empty(delta: dict) -> bool:
+    return not (delta["added"] or delta["removed"] or delta["changed"])
+
+
+def _dh_pool_manifest_load() -> None:
+    global _DH_POOL_MANIFEST
+    try:
+        data = json.loads(POOL_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if isinstance(data, dict) and isinstance(data.get("files"), dict):
+        _DH_POOL_MANIFEST = data
+
+
+def _dh_pool_manifest_save(files: dict[str, str], in_flight: list[str],
+                           event_id) -> None:
+    global _DH_POOL_MANIFEST
+    _DH_POOL_MANIFEST = {"taken_at": time.time(), "files": files,
+                         "in_flight": sorted(in_flight), "event_id": event_id}
+    try:
+        POOL_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        POOL_MANIFEST_PATH.write_text(json.dumps(_DH_POOL_MANIFEST), encoding="utf-8")
+    except Exception:
+        # Losing the file costs one re-baseline, which attributes nothing.
+        # It must never take the loop down.
+        pass
+
+
+def _dh_pool_log_delta(record: dict) -> None:
+    """Append to the durable ledger BEFORE trying to comment.
+
+    The whole point is that a mutation stops depending on someone noticing.
+    If CT111 is unreachable the comment fails, and the record still has to
+    survive -- so the local log is written first and is the source of truth."""
+    try:
+        POOL_DELTA_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with POOL_DELTA_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _dh_pool_comment_body(record: dict) -> str:
+    delta = record["delta"]
+    candidates = record["candidates"]
+    lines = [f"**Shared pool changed** while this card held the pipeline "
+             f"({record['window_seconds']}s window, "
+             f"{', '.join(_dh_pool_paths())}).", ""]
+    for label, key in (("Added", "added"), ("Removed", "removed"),
+                       ("Modified", "changed")):
+        names = delta[key]
+        if not names:
+            continue
+        shown = names[:_DH_POOL_LIST_CAP]
+        lines.append(f"{label} ({len(names)}):")
+        lines += [f"  - `{n}`" for n in shown]
+        if len(names) > len(shown):
+            lines.append(f"  - ...and {len(names) - len(shown)} more")
+        lines.append("")
+    if len(candidates) > 1:
+        lines.append(
+            f"**Attribution is ambiguous** — {len(candidates)} cards were in "
+            f"flight during this window: {', '.join(candidates)}. The pool is "
+            f"shared, so the change could be any of them.")
+    else:
+        lines.append(
+            "This card was the only one running, so the change is attributed "
+            "to it. `database/` is gitignored — there is no diff and no "
+            "revert; this comment is the record.")
+    return "\n".join(lines)
+
+
+async def _dh_pool_report(record: dict) -> None:
+    """File the delta on every card that could have caused it."""
+    body = _dh_pool_comment_body(record)
+    posted, failed = [], []
+    for task_id in record["candidates"]:
+        try:
+            await asyncio.to_thread(
+                _kanban_api_call, "POST",
+                f"/api/plugins/kanban/tasks/{quote(task_id)}/comments",
+                json={"author": "looking-glass", "body": body[:4000]})
+            posted.append(task_id)
+        except Exception as exc:
+            failed.append(f"{task_id}: {exc}")
+    record["commented"] = posted
+    if failed:
+        record["comment_errors"] = failed
+
+
+async def _pool_manifest_tick() -> None:
+    board = await _kanban_api_get("/api/plugins/kanban/board")
+    rows = [t for c in (board.get("columns") or []) for t in (c.get("tasks") or [])]
+    event_id = board.get("latest_event_id")
+    running = sorted(t["id"] for t in rows
+                     if t.get("id") and (t.get("status") or "") == "running")
+
+    prev = _DH_POOL_MANIFEST
+    if prev is None:
+        files = await _dh_pool_snapshot()
+        _dh_pool_manifest_save(files, running, event_id)
+        _DH_POOL_STATUS["snapshots"] += 1
+        _DH_POOL_STATUS["baseline"] = True
+        _DH_POOL_STATUS["note"] = (
+            f"baseline of {len(files)} file(s) taken; deltas are attributed "
+            f"from here on")
+        return
+
+    # Re-hash only at a boundary. `latest_event_id` moves on ANY board
+    # activity, which catches the case the running-set alone misses: a card
+    # that starts and finishes entirely inside one poll interval, and a card
+    # that exits by blocking (which sets no completed_at) rather than by
+    # completing.
+    if running == prev.get("in_flight") and event_id == prev.get("event_id"):
+        return
+
+    files = await _dh_pool_snapshot()
+    _DH_POOL_STATUS["snapshots"] += 1
+    delta = _dh_pool_diff(prev["files"], files)
+    taken_at = prev.get("taken_at") or time.time()
+
+    # Anyone who held the pipeline at any point in this window. `in_flight` is
+    # who was running when the last manifest was taken; `completed_at` past
+    # that mark catches a card that came and went inside one interval.
+    candidates = set(prev.get("in_flight") or [])
+    for t in rows:
+        done_at = t.get("completed_at") or 0
+        if t.get("id") and done_at and done_at > taken_at:
+            candidates.add(t["id"])
+
+    if _dh_pool_delta_empty(delta):
+        _DH_POOL_STATUS["windows_clean"] += 1
+    else:
+        record = {
+            "at": time.time(), "window_seconds": round(time.time() - taken_at),
+            "paths": _dh_pool_paths(), "delta": delta,
+            "counts": {k: len(v) for k, v in delta.items()},
+            "candidates": sorted(candidates),
+        }
+        if not candidates:
+            # No card held the pipeline, yet the shared pool moved. This is
+            # the t_d17fef80 signature exactly -- a blocked worker doing the
+            # work by hand at 23:59, outside the container and outside the
+            # board. It is the single most interesting thing this can find,
+            # so it is labelled rather than dropped for having nobody to
+            # comment on.
+            record["unattributed"] = True
+        _dh_pool_log_delta(record)
+        if candidates:
+            await _dh_pool_report(record)
+        _DH_POOL_STATUS["deltas"] += 1
+        _DH_POOL_STATUS["recent"] = ([{
+            "at": record["at"], "counts": record["counts"],
+            "candidates": record["candidates"],
+            "unattributed": record.get("unattributed", False),
+            "commented": record.get("commented", []),
+        }] + _DH_POOL_STATUS["recent"])[:20]
+
+    _dh_pool_manifest_save(files, running, event_id)
+
+
+async def _poll_pool_manifest_forever() -> None:
+    """Hash the shared pool at each run boundary and attribute what moved.
+
+    Off unless `darkhelix.pool_manifest` is true. Detective only -- it never
+    blocks a card and never touches the pool."""
+    if not _dh_pool_cfg().get("pool_manifest"):
+        return
+    _dh_pool_manifest_load()
+    _DH_POOL_STATUS["enabled"] = True
+    _DH_POOL_STATUS["baseline"] = _DH_POOL_MANIFEST is not None
+    while True:
+        try:
+            await _pool_manifest_tick()
+            _DH_POOL_STATUS["last_error"] = None
+        except Exception as exc:
+            _DH_POOL_STATUS["last_error"] = str(exc)[:300]
+        _DH_POOL_STATUS["last_tick"] = time.time()
+        await asyncio.sleep(_dh_pool_poll_seconds())
+
+
+@app.get("/api/darkhelix/pool-manifest")
+async def darkhelix_pool_manifest(limit: int = 20) -> JSONResponse:
+    """Sweep state plus the recent delta ledger.
+
+    `windows_clean` is as informative as `deltas`: it is the count of run
+    boundaries where the shared pool provably did not move."""
+    ledger: list[dict] = []
+    try:
+        lines = POOL_DELTA_LOG.read_text(encoding="utf-8").splitlines()
+        for line in lines[-max(1, min(limit, 200)):]:
+            try:
+                ledger.append(json.loads(line))
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return JSONResponse({
+        **_DH_POOL_STATUS,
+        "paths": _dh_pool_paths(),
+        "poll_seconds": _dh_pool_poll_seconds(),
+        "manifest_files": len((_DH_POOL_MANIFEST or {}).get("files") or {}),
+        "manifest_taken_at": (_DH_POOL_MANIFEST or {}).get("taken_at"),
+        "ledger": ledger,
+    })
+
+
+
 # ------------------------------------------------- DARKHELIX verification
 # Checking whether a card's work actually holds almost always means running
 # something on snarf: DARKHELIX lives at /ssdpool/DARKHELIX and no other box
@@ -4560,6 +4877,7 @@ async def start_activity_feed() -> None:
     asyncio.get_running_loop().create_task(_poll_hermes_sessions_forever())
     asyncio.get_running_loop().create_task(_poll_network_topology_forever())
     asyncio.get_running_loop().create_task(_verify_completions_forever())
+    asyncio.get_running_loop().create_task(_poll_pool_manifest_forever())
 
 
 async def _poll_rack_hosts_forever() -> None:

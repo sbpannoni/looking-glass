@@ -330,6 +330,63 @@ by copying.
 3 is a few hours and immediately ends the "we only found out by accident" problem.
 2 is the real answer but is a project. 1 without C makes things worse.
 
+### Status 2026-08-30: 3 is DONE
+
+Live on CT112 as `_poll_pool_manifest_forever()` +
+`GET /api/darkhelix/pool-manifest`, registered beside the other pollers.
+`darkhelix.pool_manifest: true` turns it on. Detective only: it never blocks a
+card and never writes to the pool.
+
+**What it watches.** `database/collab_refs` by default
+(`pool_manifest_paths`, repo-relative to `/ssdpool/DARKHELIX`; absolute paths
+and `..` escapes are dropped). Measured on snarf: 184M, 158 files, md5s in
+**~1.0s**. All of `database/` is **582G across ~154k files** and is not
+viable, so the watched set is deliberately narrow and configurable — a
+`_DH_POOL_MAX_FILES` guard refuses an accidentally enormous path rather than
+hashing for an hour and logging nothing.
+
+**When it hashes.** At run boundaries only, never on a timer alone. A boundary
+is the running-set changing *or* the board's `latest_event_id` moving. The
+event id is what catches the two cases the running-set alone cannot see: a
+card that starts and finishes inside one poll interval, and a card that exits
+by **blocking** — which sets no `completed_at` at all.
+
+**Attribution.** The delta is attributed to everyone who held the pipeline
+during the window: whoever was running when the last manifest was taken, plus
+anything that completed since. One candidate gets a plain attribution; two or
+more get an explicit *"attribution is ambiguous"* naming all of them, because
+the pool is shared and a confident finger would be a lie.
+
+**A delta with NO candidate is the most interesting output.** It means the
+shared pool moved while no card held the pipeline — the `t_d17fef80` signature
+exactly, a blocked worker doing the work by hand at 23:59, outside the
+container and outside the board. It is labelled `unattributed` in the ledger
+rather than dropped for having nobody to comment on. That makes this a
+partial detective substitute for item C until C lands.
+
+**The ledger is written before the comment.** `server/logs/pool_deltas.jsonl`
+is the source of truth and the CT111 comment is the convenience; a dashboard
+outage must not lose the record, which is the entire failure this closes.
+
+**Why not in `darkhelix-isolation`, as this doc originally proposed.** The
+plugin hooks `kanban_task_claimed`, which fires in the dispatcher and would
+give the BEFORE snapshot — but AFTER needs the run to end, and
+`kanban_task_completed` fires in the WORKER under its own profile, where the
+plugin is not enabled. That is item A's trap exactly. A completion hook would
+also miss every run ending in a block, crash or reclaim, which is most of the
+interesting ones.
+
+**Verified against the live pool.** Baseline of 158 files taken on restart.
+The snapshot agrees with the forensics done by hand: `234.fna` hashes to
+`fc253a779d2d84d45b59b3eccd84d705`, the value `t_ca4d6f36` recorded before
+deletion, and is byte-identical to `29459.fna` — confirming the restore
+recorded above. Driving a full tick with that real baseline and a simulated
+mutation reproduced the incident's own shape (`234.fna` removed, `263.fna`
+modified) and filed it correctly. 14 tests in
+`server/tests/test_pool_manifest.py` cover the boundary rule, clean windows,
+ambiguous and unattributed deltas, the inside-one-interval case, ledger-first
+durability, path escapes and the size guard.
+
 Note work item E's read-only mount is a natural first half of 1: it stops the
 *engine* writing to the shared pool without touching what a human or a blocked
 worker can do outside the container.
@@ -378,8 +435,19 @@ See `hermes-plugins/README.md`.
    Unblocked the class; cards can now actually run their tests.
 2. ~~**A** — completion verification.~~ **DONE 2026-08-30.** Implemented and
    firing automatically; the board stops lying without anyone asking it to.
-3. **C** — make blocked terminal. Needed before any read-only enforcement. ← *next*
-4. **Database policy 3** — manifest logging.
+3. **C** — make blocked terminal. ← *next*. Note the stated prerequisite
+   ("needed before any read-only enforcement") is for database policy **1**,
+   which is explicitly not the plan; policy 3 above now DETECTS the
+   post-block improvisation C would prevent, so C is about enforcement, not
+   visibility. Its open question: enforcement cannot live in Hermes (vendor
+   software, configured not patched), and the obvious lever —
+   `hermes kanban reclaim`, already exposed by the HUD, which does kill a
+   host-local worker — also sets the card to `ready`, which is dispatchable.
+   Using it to enforce a block would immediately re-dispatch the card just
+   blocked. Resolve that before building.
+4. ~~**Database policy 3** — manifest logging.~~ **DONE 2026-08-30.** Every
+   mutation of the shared pool is now attributable, and one that belongs to
+   nobody is flagged as such.
 5. **B** — parent-test gating.
 6. **D** — attempt classification.
 7. **Database policy 2** — ZFS clones, if data changes remain common.
