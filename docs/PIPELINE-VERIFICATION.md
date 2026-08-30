@@ -354,17 +354,25 @@ was preferred only because the improvisation was often *right*. A sanctioned
 in-run write path makes that same correct work a normal operation, which makes
 (1) — blocking simply ends the run — safe to enforce.
 
-#### Remaining work, on snarf
+#### Remaining work
 
-1. `mkdir /ssdpool/pool-staging` and mount it **rw** into the engine container
-   in `/ssdpool/coder-engine/pipeline/dispatch_task.py`, beside the existing
-   `:ro` primary mount. That repo is snarf's, not CT112's.
-2. Tell the worker the path exists — it needs to know that adding a reference
-   means writing to `/ssdpool/pool-staging/<task_id>/` and saying so, not
-   trying to write the pool directly.
-3. Then set `darkhelix.enforce_block: true` on CT112.
+1. ~~Tell the worker the path exists.~~ **DONE.** This turned out to be a
+   CT112 change, not a snarf one: `_dispatch_target_note()` is the block the
+   worker reads, and the HUD writes it into every provisioned card's body. It
+   now states that the pool is read-only in the container, names
+   `/ssdpool/pool-staging/<task_id>/` and `$POOL_STAGING`, and says to record
+   the files in the summary.
+2. **On snarf** — mount the staging area rw. Run
+   `scripts/snarf-pool-staging-mount.py` **on snarf**: it patches
+   `/ssdpool/coder-engine/pipeline/dispatch_task.py` beside the existing `:ro`
+   primary mount (backing it up first, refusing to write a file that does not
+   parse) and creates `/ssdpool/pool-staging`. Idempotent. No engine restart
+   needed — `darkhelix-engine.py` shells a fresh `dispatch_task.py` per
+   attempt. That repo is snarf's, not CT112's, so the change is committed
+   there.
+3. Then set `darkhelix.enforce_block: true` on CT112 and restart the HUD.
 
-Do them in that order. Step 3 before steps 1–2 rebuilds the hard wall.
+Do them in that order. Step 3 before step 2 rebuilds the hard wall.
 
 ---
 
