@@ -3639,6 +3639,193 @@ async def kanban_verify_completion(request: Request) -> JSONResponse:
     return JSONResponse(result, status_code=status)
 
 
+# ---------------------------------------------- automatic completion sweep
+# The check above is only worth anything if something RUNS it. A per-card
+# endpoint means the board keeps lying until a human thinks to ask, which is
+# the same shape as the failure it exists to catch.
+#
+# This is a server-side poller, NOT a side effect of GET /api/kanban. That
+# endpoint is read by every open HUD tab several times a minute, so hanging
+# the sweep off it would fire it concurrently once per tab, put ssh round
+# trips in the path of a page render, and make how often a card gets judged
+# depend on how many browsers happen to be open. One loop owned by the
+# server is the "board poll" this was always meant to be, and it matches the
+# activity-feed pollers registered beside it.
+#
+# SEEDING -- why the first pass deliberately checks nothing.
+# The backlog of `done` cards was already swept by hand on 2026-08-30 (14
+# verified, 4 no-claim, 3 flagged) and those flags were ADJUDICATED in
+# docs/PIPELINE-VERIFICATION.md: t_97cff6a5's work really is in master,
+# which `master..hermes/<id>` structurally cannot see. Blocking that card
+# automatically would be wrong, and without a seed it would happen again on
+# every single restart. So the first pass records the ids it finds and
+# judges none of them.
+#
+# The seen-set is PERSISTED for that same reason, and persistence closes the
+# opposite hole for free: a card completed while the HUD was down is absent
+# from the file, so it is checked on the next boot instead of being seeded
+# past. Losing the file fails in the safe direction -- it re-seeds, skipping
+# cards rather than mass-blocking them.
+VERIFY_STATE_PATH = ROOT / "logs" / "verify_completions.json"
+
+# Comfortably longer than the board's `done` lane, bounded so the file cannot
+# grow forever. Oldest ids drop first; anything aging out is long archived.
+_DH_VERIFY_SEEN_MAX = 500
+
+_DH_VERIFY_STATE: dict = {"seeded": False, "seen": []}
+_DH_VERIFY_STATUS: dict = {
+    "enabled": False, "seeded": False, "last_tick": None, "last_error": None,
+    "note": None, "checked": 0, "recent": [],
+}
+
+
+def _dh_verify_cfg() -> dict:
+    return CFG.get("darkhelix") or {}
+
+
+def _dh_verify_poll_seconds() -> int:
+    return int(_dh_verify_cfg().get("verify_poll_seconds") or 120)
+
+
+def _dh_verify_load_state() -> None:
+    global _DH_VERIFY_STATE
+    try:
+        data = json.loads(VERIFY_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if isinstance(data, dict) and isinstance(data.get("seen"), list):
+        _DH_VERIFY_STATE = {
+            "seeded": bool(data.get("seeded")),
+            "seen": [str(i) for i in data["seen"]][-_DH_VERIFY_SEEN_MAX:],
+        }
+
+
+def _dh_verify_save_state() -> None:
+    try:
+        VERIFY_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        VERIFY_STATE_PATH.write_text(json.dumps(_DH_VERIFY_STATE), encoding="utf-8")
+    except Exception:
+        # A sweep that cannot persist still verifies correctly this run; it
+        # would only re-seed after a restart. Not worth stopping for.
+        pass
+
+
+def _dh_verify_mark_seen(task_id: str) -> None:
+    seen = _DH_VERIFY_STATE["seen"]
+    if task_id in seen:
+        return
+    seen.append(task_id)
+    del seen[:-_DH_VERIFY_SEEN_MAX]
+
+
+def _dh_verify_record(entry: dict) -> None:
+    entry["at"] = time.time()
+    _DH_VERIFY_STATUS["recent"] = ([entry] + _DH_VERIFY_STATUS["recent"])[:20]
+
+
+async def _dh_done_task_ids() -> list[str]:
+    """Ids the board currently shows as `done`, most recently finished first.
+
+    Read straight from the plugin API rather than through /api/kanban so the
+    sweep does not depend on that endpoint's slimming, and newest-first so a
+    burst of completions is judged in the order it happened."""
+    board = await _kanban_api_get("/api/plugins/kanban/board")
+    rows = [t for c in (board.get("columns") or []) for t in (c.get("tasks") or [])]
+    rows.sort(key=lambda t: t.get("completed_at") or t.get("created_at") or 0,
+              reverse=True)
+    return [t["id"] for t in rows
+            if t.get("id") and (t.get("status") or "") == "done"]
+
+
+async def _verify_completions_tick() -> None:
+    done = await _dh_done_task_ids()
+
+    if not _DH_VERIFY_STATE["seeded"]:
+        for task_id in done:
+            _dh_verify_mark_seen(task_id)
+        _DH_VERIFY_STATE["seeded"] = True
+        _dh_verify_save_state()
+        _DH_VERIFY_STATUS["seeded"] = True
+        _DH_VERIFY_STATUS["note"] = (
+            f"seeded {len(done)} already-done card(s) without judging them "
+            "(that backlog was swept and adjudicated by hand); verification "
+            "applies to completions from here on")
+        return
+
+    seen = set(_DH_VERIFY_STATE["seen"])
+    fresh = [t for t in done if t not in seen]
+    if not fresh:
+        return
+
+    # Bounded per tick: each card costs a board read plus up to four ssh round
+    # trips to snarf, and a decomposer fan-out can land a dozen at once. The
+    # rest are picked up on the following ticks -- nothing is dropped, because
+    # a card is only marked seen once it has actually been judged.
+    limit = int(_dh_verify_cfg().get("verify_max_per_tick") or 5)
+    for task_id in fresh[:limit]:
+        try:
+            result = await _darkhelix_verify_completion(task_id)
+        except Exception as exc:
+            _dh_verify_record({"task_id": task_id, "verdict": "error",
+                               "error": str(exc)[:300]})
+            continue
+        if not result.get("ok"):
+            # snarf or the board was unreachable. That is an outage, not a
+            # verdict -- leave the card unseen so the next tick retries it
+            # instead of recording the outage as a pass.
+            _dh_verify_record({"task_id": task_id, "verdict": "error",
+                               "error": str(result.get("error"))[:300]})
+            continue
+        _dh_verify_mark_seen(task_id)
+        _DH_VERIFY_STATUS["checked"] += 1
+        entry = {"task_id": task_id, "verdict": result.get("verdict")}
+        if result.get("verdict") == "unverified":
+            # `action` is _kanban_block's own report of what reached the card
+            # -- blocked, commented, or failed -- not an assumption that the
+            # move landed.
+            entry["action"] = result.get("action")
+            entry["checked_for"] = result.get("checked")
+        _dh_verify_record(entry)
+    _dh_verify_save_state()
+
+
+async def _verify_completions_forever() -> None:
+    """Judge each newly-completed DARKHELIX card once, in the background.
+
+    Off unless `darkhelix.verify_completions` is true: this moves cards on a
+    shared board, so it is opt-in per deployment rather than on by default."""
+    if not _dh_verify_cfg().get("verify_completions"):
+        return
+    _dh_verify_load_state()
+    _DH_VERIFY_STATUS["enabled"] = True
+    _DH_VERIFY_STATUS["seeded"] = _DH_VERIFY_STATE["seeded"]
+    while True:
+        try:
+            await _verify_completions_tick()
+            _DH_VERIFY_STATUS["last_error"] = None
+        except Exception as exc:
+            # The dashboard being down must not kill the loop -- same
+            # swallow-and-retry contract as the pollers beside it.
+            _DH_VERIFY_STATUS["last_error"] = str(exc)[:300]
+        _DH_VERIFY_STATUS["last_tick"] = time.time()
+        await asyncio.sleep(_dh_verify_poll_seconds())
+
+
+@app.get("/api/kanban/verify-completion")
+async def kanban_verify_completion_status() -> JSONResponse:
+    """What the automatic sweep has done, and whether it is running at all.
+
+    A detective control nobody can see the state of is one nobody trusts:
+    this says whether the loop is enabled, whether it has seeded, when it
+    last ticked, and the last 20 verdicts with what happened to each card."""
+    return JSONResponse({
+        **_DH_VERIFY_STATUS,
+        "seen_count": len(_DH_VERIFY_STATE["seen"]),
+        "poll_seconds": _dh_verify_poll_seconds(),
+    })
+
+
+
 # ------------------------------------------------- DARKHELIX verification
 # Checking whether a card's work actually holds almost always means running
 # something on snarf: DARKHELIX lives at /ssdpool/DARKHELIX and no other box
@@ -4372,6 +4559,7 @@ async def start_activity_feed() -> None:
     asyncio.get_running_loop().create_task(_poll_rack_hosts_forever())
     asyncio.get_running_loop().create_task(_poll_hermes_sessions_forever())
     asyncio.get_running_loop().create_task(_poll_network_topology_forever())
+    asyncio.get_running_loop().create_task(_verify_completions_forever())
 
 
 async def _poll_rack_hosts_forever() -> None:

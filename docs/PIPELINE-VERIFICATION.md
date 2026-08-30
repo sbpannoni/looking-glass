@@ -141,12 +141,13 @@ hook refuses `done`.
 
 ---
 
-### Status 2026-08-30: IMPLEMENTED, sweep-only (not yet automatic)
+### Status 2026-08-30: DONE — implemented and firing automatically
 
 Live on CT112 as `_darkhelix_verify_completion()` +
 `POST /api/kanban/verify-completion` (`dry_run` supported, mirroring
-provision's audit mode). **Not yet wired to fire automatically** — it must be
-invoked per card today. The background sweep is the remaining piece.
+provision's audit mode), and **wired to fire on its own** by
+`_verify_completions_forever()`, a server-side poller registered beside the
+activity-feed pollers in `start_activity_feed`.
 
 **It is NOT a CT111 plugin hook, deliberately.** `kanban_task_completed` does
 exist and even carries the summary, but it would never have fired.
@@ -158,6 +159,38 @@ the `darkhelix` profile — assignee of `t_43886eea`, the card this check exists
 to catch — has neither. Cards here complete under five different profiles, so
 the HUD's board poll is the real choke point, the same argument that put
 provisioning on `kanban_task_claimed`.
+
+#### The automatic sweep
+
+`darkhelix.verify_completions: true` in `server.yaml` turns it on
+(`verify_poll_seconds`, default 120; `verify_max_per_tick`, default 5). It is
+opt-in because it **moves cards on a shared board**. `GET
+/api/kanban/verify-completion` reports whether it is enabled and seeded, when
+it last ticked, and the last 20 verdicts.
+
+**It is a poller, not a hook on `GET /api/kanban`.** That endpoint is read by
+every open HUD tab several times a minute, so a side effect there would fire
+once per tab concurrently, put ssh round trips in the path of a page render,
+and make how often a card is judged depend on how many browsers are open.
+
+**The first tick seeds the `done` lane and judges none of it.** The backlog
+below was swept by hand and its three flags were *adjudicated here* —
+`t_97cff6a5`'s work really is in master. Auto-blocking those would be wrong,
+and without a seed it would recur on every restart. The seen-set persists to
+`server/logs/verify_completions.json` for that reason, which also closes the
+opposite hole: a card completed while the HUD was down is absent from the file
+and gets checked on the next boot rather than seeded past. Losing that file
+fails safe — it re-seeds, skipping cards rather than mass-blocking them.
+Verified on the live board: it seeded exactly the 21 cards below, judged none.
+
+A card is marked seen only once it has been **judged**. `ok: False` means snarf
+or the board was unreachable, which is an outage and not a verdict, so the card
+stays unseen and is retried — otherwise an outage would launder a card past the
+check permanently.
+
+`server/tests/test_verify_sweep.py` covers the seed, persistence across
+restart, judge-once, the per-tick bound and carry-over, newest-first order,
+outage retry, and the opt-in default.
 
 **Acceptance met:** `t_43886eea` → `unverified`. Swept all 21 `done` cards
 (dry-run, nothing moved): 14 verified, 4 no-claim, 3 flagged.
@@ -343,8 +376,8 @@ See `hermes-plugins/README.md`.
 
 1. ~~**E** — engine test gate + read-only mount.~~ **DONE 2026-08-30.**
    Unblocked the class; cards can now actually run their tests.
-2. ~~**A** — completion verification.~~ **IMPLEMENTED 2026-08-30**, sweep-only;
-   the automatic board-poll trigger is the remaining piece.
+2. ~~**A** — completion verification.~~ **DONE 2026-08-30.** Implemented and
+   firing automatically; the board stops lying without anyone asking it to.
 3. **C** — make blocked terminal. Needed before any read-only enforcement. ← *next*
 4. **Database policy 3** — manifest logging.
 5. **B** — parent-test gating.
