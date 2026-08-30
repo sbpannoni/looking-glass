@@ -195,6 +195,18 @@ async def test_enforcement_is_off_by_default(monkeypatch):
     assert called is False
 
 
-async def test_shipped_config_has_enforcement_off():
-    """Guards the ordering constraint in the live config, not just the default."""
-    assert (srv.CFG.get("darkhelix") or {}).get("enforce_block") is not True
+async def test_shipped_config_never_enforces_without_a_staging_path():
+    """The ordering constraint, as an invariant that outlives the rollout.
+
+    This started life as "enforcement must be off", which was right only until
+    the staging mount landed on snarf (2026-08-30). The durable rule is the
+    reason behind it: ending a run the moment a card blocks itself is only
+    legitimate while a card that needs to ADD a reference genome has somewhere
+    to put it. Enforcement with no staging root configured rebuilds the hard
+    wall this whole item exists to dismantle.
+    """
+    dh = srv.CFG.get("darkhelix") or {}
+    if dh.get("enforce_block") is True:
+        assert (dh.get("pool_staging_root") or "").startswith("/"), (
+            "enforce_block is on with no pool_staging_root — a card needing to "
+            "add a reference genome would have no sanctioned path")

@@ -4210,10 +4210,10 @@ async def darkhelix_pool_manifest(limit: int = 20) -> JSONResponse:
 # pool mutation. Out here, staging is invisible to both, and promotion is what
 # the manifest records.
 #
-# THE MOUNT IS NOT IN PLACE YET. dispatch_task.py on snarf must mount
-# POOL_STAGING_ROOT rw for a worker to be able to use this; until then these
-# endpoints serve a human staging files by hand, and item C's enforcement must
-# stay off.
+# The mount is IN PLACE (dispatch_task.py on snarf, 2026-08-30): the container
+# gets `-v {staging}:{staging}` plus `POOL_STAGING={staging}`. Verified in a
+# real container -- a write to $POOL_STAGING succeeds and a touch of
+# database/collab_refs/ still fails "Read-only file system".
 POOL_STAGING_ROOT = "/ssdpool/pool-staging"
 
 # Reference data only. This is a promotion path into a shared bioinformatics
@@ -4283,8 +4283,9 @@ async def darkhelix_staged(task_id: str) -> JSONResponse:
                          "staging": _dh_staging_dir(task_id),
                          "destination": f"{DARKHELIX_REPO_PATH}/{_DH_PROMOTE_DEST}",
                          "files": files,
-                         "mount_note": ("dispatch_task.py must mount this rw for a "
-                                        "worker to write here; not yet in place")})
+                         "mount_note": ("mounted rw into the engine container as "
+                                        "$POOL_STAGING; the pool itself stays read-only "
+                                        "in there")})
 
 
 @app.post("/api/darkhelix/promote-refs")
