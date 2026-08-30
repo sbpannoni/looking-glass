@@ -141,6 +141,51 @@ hook refuses `done`.
 
 ---
 
+### Status 2026-08-30: IMPLEMENTED, sweep-only (not yet automatic)
+
+Live on CT112 as `_darkhelix_verify_completion()` +
+`POST /api/kanban/verify-completion` (`dry_run` supported, mirroring
+provision's audit mode). **Not yet wired to fire automatically** — it must be
+invoked per card today. The background sweep is the remaining piece.
+
+**It is NOT a CT111 plugin hook, deliberately.** `kanban_task_completed` does
+exist and even carries the summary, but it would never have fired.
+`kanban_task_claimed` runs in the *dispatcher* (root `HERMES_HOME`, where
+`darkhelix-isolation` is enabled); completion is `hermes kanban complete`
+spawned by the *worker*, which runs under its own **profile**. Plugins are
+per-profile: `hermes -p coder plugins list` shows only `darkhelix-engine`, and
+the `darkhelix` profile — assignee of `t_43886eea`, the card this check exists
+to catch — has neither. Cards here complete under five different profiles, so
+the HUD's board poll is the real choke point, the same argument that put
+provisioning on `kanban_task_claimed`.
+
+**Acceptance met:** `t_43886eea` → `unverified`. Swept all 21 `done` cards
+(dry-run, nothing moved): 14 verified, 4 no-claim, 3 flagged.
+
+Two heuristics from this doc were corrected by that sweep:
+
+- *Naming a file is not claiming to have written it.* Triggering on any real
+  file extension was tried and reverted — it fired on three pure-analysis
+  cards (`t_26383d0a`, `t_ca4d6f36`, `t_e8465c45`) that match no verb and
+  merely describe existing data. In a bioinformatics repo that is how findings
+  are stated. A verb is required; filenames count only as *evidence*.
+- *The doc's verb list under-triggers.* It missed `documented`, `merged`,
+  `produced`, `fixed`. Widened, since the evidence side is generous.
+
+A fourth evidence source was added — a **child's** branch — because a rollup
+card legitimately claims work it did not commit. It is gated to summaries that
+actually credit children: ungated, "any child has commits" cleared
+`t_43886eea` itself, whose child really did commit.
+
+**Known gap: work merged to master is invisible.** Evidence is
+`master..hermes/<id>`, so once a card's work lands in `master` and its branch
+is deleted, the count is zero. `t_97cff6a5` is flagged for this reason — its
+claimed `gene_prediction.py` fix *is* in master (`1ec421e`), credited to
+another card, and it has no child links despite claiming four. Treat flags as
+"the board cannot show this", not "this is a fabrication". `t_82a2d485` by
+contrast is a true positive: `s2fast_inclusion_policy.md` exists in no commit
+and nowhere on disk.
+
 ## Work item B: gate on the parent's tests, not the card's
 
 `a2f5adc` relaxed its own assertion in the same commit as the change that needed
@@ -298,8 +343,9 @@ See `hermes-plugins/README.md`.
 
 1. ~~**E** — engine test gate + read-only mount.~~ **DONE 2026-08-30.**
    Unblocked the class; cards can now actually run their tests.
-2. **A** — completion verification. Cheapest real integrity win. ← *next*
-3. **C** — make blocked terminal. Needed before any read-only enforcement.
+2. ~~**A** — completion verification.~~ **IMPLEMENTED 2026-08-30**, sweep-only;
+   the automatic board-poll trigger is the remaining piece.
+3. **C** — make blocked terminal. Needed before any read-only enforcement. ← *next*
 4. **Database policy 3** — manifest logging.
 5. **B** — parent-test gating.
 6. **D** — attempt classification.

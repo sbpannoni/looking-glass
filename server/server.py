@@ -3352,6 +3352,293 @@ async def _kanban_block(task_id: str, reason: str, kind: str = "needs_input") ->
     return "failed"
 
 
+# ------------------------------------------- DARKHELIX completion verification
+# A worktree constrains WHERE a worker writes. Nothing constrained what it
+# CLAIMS. On 2026-08-29 t_43886eea reported "Wrote collab_refs generator audit
+# report (535 lines) to worktree", was marked done, and had written nothing at
+# all: no branch, no commit, no file, no attachment. Its worker had failed to
+# reach snarf (`ssh ... exit 255`) and reported success anyway.
+#
+# Completion was self-reported and never checked, so the board asserted work
+# that did not exist -- and two child cards were cut from that non-existent
+# work. This closes that: a card whose summary CLAIMS an artifact must be able
+# to show one.
+#
+# WHY THIS LIVES HERE AND NOT IN A CT111 PLUGIN
+# ---------------------------------------------
+# The obvious design is the mirror of provisioning: a `kanban_task_completed`
+# hook in `darkhelix-isolation`. That hook does exist and even carries the
+# summary. It would not have fired.
+#
+# `kanban_task_claimed` fires in the DISPATCHER (root HERMES_HOME), where
+# `darkhelix-isolation` is enabled. `kanban_task_completed` fires wherever
+# `complete_task` is called -- and completion is `hermes kanban complete`,
+# spawned by the WORKER, which runs with HERMES_HOME set to its own PROFILE.
+# Plugins are enabled per profile: `hermes -p coder plugins list` shows only
+# `darkhelix-engine`, and the `darkhelix` profile -- the assignee of the very
+# card this check exists to catch -- has neither. A hook registered there
+# would have silently never run, which is the failure mode this whole document
+# keeps rediscovering.
+#
+# Cards on this board complete under coder, darkhelix, bioinformatics,
+# researcher and default. Enabling one plugin across every profile, forever,
+# including profiles nobody has created yet, is precisely the per-profile
+# sprawl that left four identical stale memory files behind. The HUD already
+# polls the board, so it is the one place every completed card passes through
+# regardless of who ran it -- the same argument that moved provisioning to
+# `kanban_task_claimed` in the first place, applied to the other end.
+#
+# Verification is detective either way: lifecycle hooks are observers whose
+# return value is ignored, so even the plugin form could not have vetoed a
+# `done`. Nothing is lost by checking a moment later.
+
+# A summary only has to hold up if it CLAIMS something checkable. "Reviewed the
+# fetch table and found no defect" asserts no artifact and is left alone; the
+# words below are the ones that assert one. Deliberately a text heuristic: a
+# structured result contract would be stricter, but it needs the worker to
+# cooperate, and a worker that fabricates a summary is exactly the one that
+# will not.
+# The verb list started as the doc's (wrote|created|added|patch|commit|report)
+# and was widened against the board: a dry-run sweep of all 21 done cards showed
+# it missing real assertions. t_82a2d485 said "Documented in
+# s2fast_inclusion_policy.md", t_d17fef80 said "Merged to master as 2bad11f",
+# t_97cff6a5 said "gene_prediction.py now uses real contig IDs" -- every one an
+# artifact claim, none of them matched. A check that does not fire is worth
+# nothing, and widening is cheap here because the EVIDENCE side is generous:
+# any one of three signals clears a card, and work that really happened almost
+# always left a commit.
+_DH_ARTIFACT_CLAIM_RE = re.compile(
+    r"\b(wrote|created|added|patch|commit|committed|report|documented|"
+    r"produced|merged|implemented|generated|updated|fixed|refactored)\b", re.I)
+
+# A VERB is required, and merely naming a file is deliberately NOT a claim.
+# Triggering on any summary that mentioned a real extension was tried and
+# reverted: on this board it fired on three pure-analysis cards -- t_26383d0a,
+# t_ca4d6f36 and t_e8465c45 all match no verb at all and simply DESCRIBE
+# existing data ("Confirmed 234.fna and 29459.fna are byte-identical
+# duplicates"). In a bioinformatics repo, naming a data file is how findings
+# are stated; it is not an assertion that the card wrote it. Filenames still
+# matter on the EVIDENCE side, which is where they belong.
+# A summary that credits its children rather than itself. Only these may be
+# cleared by a child's branch.
+_DH_ROLLUP_CLAIM_RE = re.compile(
+    r"\b(child|children|subtask|subtasks|sub-task|sub-tasks)\b", re.I)
+
+
+def _dh_claims_artifact(summary: str) -> bool:
+    """True when a summary asserts something that should be findable."""
+    return bool(_DH_ARTIFACT_CLAIM_RE.search(summary or ""))
+
+# Filenames named in a summary, e.g. "updated coord_liftover.py". Requires a
+# real extension so prose ("3-of-9", "531/533") is not mistaken for a path.
+_DH_SUMMARY_FILE_RE = re.compile(r"[\w./-]+\.[A-Za-z][A-Za-z0-9]{0,5}\b")
+
+# Words that end a sentence, not files. `.md`/`.py` etc. are real; these are
+# the false positives the extension rule alone still lets through.
+_DH_FILE_STOPWORDS = {"e.g", "i.e", "etc", "vs", "no", "cf"}
+
+
+def _dh_summary_files(summary: str) -> list[str]:
+    """Filenames a summary names, most specific first."""
+    out: list[str] = []
+    for tok in _DH_SUMMARY_FILE_RE.findall(summary or ""):
+        tok = tok.strip(".,;:)(").lstrip("`")
+        if not tok or tok.lower() in _DH_FILE_STOPWORDS:
+            continue
+        # A bare number with a decimal point ("533.2") is not a file.
+        if tok.replace(".", "").isdigit():
+            continue
+        if tok not in out:
+            out.append(tok)
+    return out[:8]
+
+
+async def _dh_has_attachment(task_id: str) -> bool:
+    """True when the card carries at least one attachment.
+
+    Read over ssh rather than from the task detail's `events`: an attachment
+    shows there as an `attached` event, but a long run buries those under
+    dozens of heartbeats and the event list is not guaranteed complete.
+    `hermes kanban attachments` is the authoritative answer and is one cheap
+    call."""
+    try:
+        rc, out = await _kanban_ssh(f"hermes kanban attachments {shlex.quote(task_id)}")
+    except Exception:
+        return False
+    if rc != 0:
+        return False
+    return "No attachments on" not in (out or "")
+
+
+async def _darkhelix_verify_completion(task_id: str, dry_run: bool = False) -> dict:
+    """Check that a card marked `done` can show the artifact it claims.
+
+    Returns a verdict dict; `ok` is about the CHECK having run, not about the
+    card passing. `verdict` is one of:
+
+      "verified"    -- the claim is backed by at least one piece of evidence
+      "no-claim"    -- the summary asserts no artifact; nothing to check
+      "unverified"  -- it claims an artifact and none of the evidence holds
+
+    Evidence is anything that proves work exists, in increasing cost:
+      1. the card's branch has commits master does not have;
+      2. the card has an attachment (the engine attaches its patch);
+      3. a file the summary names by hand exists in the card's worktree.
+
+    Any ONE is enough. The check is asymmetric on purpose -- it is trying to
+    disprove "this card did nothing", not to audit the work's quality, which
+    is what the test gate and human review are for."""
+    if not _TASK_ID_RE.match(task_id or ""):
+        return {"ok": False, "error": "bad task id"}
+
+    try:
+        detail = await _kanban_task_detail(task_id)
+    except Exception as exc:
+        return {"ok": False, "error": f"task lookup failed: {exc}"}
+
+    task = detail.get("task") or {}
+    if (task.get("status") or "") != "done":
+        return {"ok": True, "verdict": "skipped",
+                "why": f"status is {task.get('status')!r}, not done"}
+
+    # Same scope rule as provisioning: judging a card in someone else's repo
+    # by DARKHELIX's evidence would be worse than not judging it.
+    try:
+        in_scope, _parents = await _darkhelix_lineage(task_id, detail)
+    except Exception as exc:
+        return {"ok": False, "error": f"lineage walk failed: {exc}"}
+    if not in_scope:
+        return {"ok": True, "verdict": "skipped", "why": "not DARKHELIX work"}
+
+    summary = (task.get("latest_summary") or task.get("result") or "").strip()
+    if not summary:
+        return {"ok": True, "verdict": "skipped", "why": "no summary to check"}
+    if not _dh_claims_artifact(summary):
+        return {"ok": True, "verdict": "no-claim", "summary": summary[:200]}
+
+    fields = _dispatch_target_fields(task.get("body") or "")
+    branch = fields.get("branch") or _dh_branch(task_id)
+    worktree = fields.get("worktree") or _dh_worktree(task_id)
+    repo = fields.get("repo") or DARKHELIX_REPO_PATH
+    # A card whose provisioning failed carries "NONE -- ISOLATION FAILED".
+    if not worktree.startswith("/"):
+        worktree = ""
+
+    evidence: list[str] = []
+    checked: list[str] = []
+
+    # 1. Commits on the card's branch that master does not already have.
+    #    Counted against master rather than the card's base so that
+    #    inheriting a parent's branch cannot itself look like new work.
+    rc, out = await _fleet_ssh(
+        "snarf",
+        f"cd {shlex.quote(repo)} && "
+        f"git rev-parse --verify --quiet {shlex.quote(branch)} >/dev/null && "
+        f"git rev-list --count master..{shlex.quote(branch)} || echo MISSING")
+    commits = (out or "").strip().splitlines()[-1] if out else ""
+    if rc == 0 and commits.isdigit() and int(commits) > 0:
+        evidence.append(f"branch {branch} has {commits} commit(s) not in master")
+    checked.append(f"branch {branch}: "
+                   + ("absent" if commits == "MISSING" else f"{commits or '?'} commits"))
+
+    # 2. An attachment -- how dispatch_to_engine delivers its patch.
+    if not evidence:
+        if await _dh_has_attachment(task_id):
+            evidence.append("card has an attachment")
+        checked.append("attachments: none")
+
+    # 3. A CHILD's branch. A rollup card legitimately claims work it did not
+    #    commit itself: t_97cff6a5's summary is "All 4 child tasks completed
+    #    successfully. The pyrodigal GFF seqid inconsistency has been fixed",
+    #    and every one of those commits is on a child's branch. Judging a
+    #    parent only by its own branch marks the decomposer's own bookkeeping
+    #    card as a fabrication.
+    # ...but ONLY for a summary that actually claims its children's work.
+    # Without this gate the check clears the very card it was built to catch:
+    # t_43886eea has a child that really did commit, so "any child has
+    # commits" marked the fabricated "Wrote ... report (535 lines) to
+    # worktree" as verified. A first-person claim about THIS card's worktree
+    # is not substantiated by a different card's branch. A rollup says so in
+    # words -- "All 4 child tasks completed successfully" -- and that is the
+    # only shape allowed to borrow its children's evidence.
+    children = list((detail.get("links") or {}).get("children") or [])
+    if not evidence and children and not _DH_ROLLUP_CLAIM_RE.search(summary):
+        checked.append(f"child branches ({len(children)}): not a rollup claim, "
+                       "children cannot vouch for this summary")
+        children = []
+    if not evidence and children:
+        for child in children[:8]:
+            if not _TASK_ID_RE.match(child or ""):
+                continue
+            rc, out = await _fleet_ssh(
+                "snarf",
+                f"cd {shlex.quote(repo)} && "
+                f"git rev-list --count master..{shlex.quote(_dh_branch(child))} "
+                f"2>/dev/null || echo 0")
+            n = (out or "").strip().splitlines()[-1] if out else "0"
+            if rc == 0 and n.isdigit() and int(n) > 0:
+                evidence.append(f"child {child} has {n} commit(s) not in master")
+                break
+        checked.append(f"child branches ({len(children)}): "
+                       + ("none carry commits" if not evidence else "ok"))
+
+    # 4. A file the summary names, present in the card's worktree. Last
+    #    because it costs an ssh round trip and is the weakest signal: an
+    #    uncommitted file proves work happened, not that it survived.
+    named = _dh_summary_files(summary)
+    if not evidence and named and worktree:
+        quoted = " ".join(shlex.quote(f"{worktree}/{n}") for n in named)
+        rc, out = await _fleet_ssh("snarf", f"ls -1d {quoted} 2>/dev/null | head -5")
+        found = [ln for ln in (out or "").splitlines() if ln.strip()]
+        if rc == 0 and found:
+            evidence.append(f"summary names a file that exists: {found[0]}")
+        checked.append(f"named files {named}: "
+                       + (", ".join(found) if found else "none present"))
+    elif not evidence:
+        checked.append("named files: summary names none")
+
+    if evidence:
+        return {"ok": True, "verdict": "verified", "evidence": evidence,
+                "checked": checked, "summary": summary[:200]}
+
+    reason = (
+        "Completion not verified. This card was marked done with a summary "
+        "claiming an artifact, but none could be found.\n\n"
+        f"Summary: {summary[:300]}\n\n"
+        "Checked:\n  - " + "\n  - ".join(checked) + "\n\n"
+        "No commit on the card's branch, no attachment, and no named file on "
+        "disk. Either the work was not saved where the board can see it, or "
+        "the summary is wrong. Re-open with the evidence, or correct the "
+        "summary and complete again."
+    )
+    result = {"ok": True, "verdict": "unverified", "checked": checked,
+              "reason": reason, "summary": summary[:200]}
+    if dry_run:
+        result["dry_run"] = True
+        return result
+    # Observers cannot veto a `done`, so the card is moved instead: it lands
+    # in the blocked lane carrying why. Never crash the worker and never
+    # silently pass -- the point is that the board stops lying.
+    result["action"] = await _kanban_block(task_id, reason, kind="needs_input")
+    return result
+
+
+@app.post("/api/kanban/verify-completion")
+async def kanban_verify_completion(request: Request) -> JSONResponse:
+    """Check one completed card's claim against the tree.
+
+    `dry_run: true` reports the verdict and changes nothing, which is how the
+    whole board can be audited without moving a card."""
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    result = await _darkhelix_verify_completion(
+        task_id, dry_run=bool(payload.get("dry_run")))
+    status = 200 if result.get("ok") else 502
+    if result.get("error") == "bad task id":
+        status = 400
+    return JSONResponse(result, status_code=status)
+
+
 # ------------------------------------------------- DARKHELIX verification
 # Checking whether a card's work actually holds almost always means running
 # something on snarf: DARKHELIX lives at /ssdpool/DARKHELIX and no other box
