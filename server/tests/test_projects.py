@@ -71,8 +71,17 @@ def test_api_projects_returns_error_entries_without_github_token(monkeypatch):
     resp = client.get("/api/projects")
     assert resp.status_code == 200
     data = resp.json()
-    assert len(data["projects"]) == 4
-    assert all(p.get("error") == "unreachable" for p in data["projects"])
+    # Counted against the roster rather than a literal. This asserted 4 while
+    # TRACKED_PROJECTS had grown to 6, so it failed for a reason that had
+    # nothing to do with tokens -- and two of the six carry no tracker file
+    # (`path: None`), which makes them `untracked`, never `unreachable`.
+    assert len(data["projects"]) == len(srv.TRACKED_PROJECTS)
+    has_tracker = {p["name"] for p in srv.TRACKED_PROJECTS if p.get("path")}
+    for entry in data["projects"]:
+        if entry["name"] in has_tracker:
+            assert entry.get("error") == "unreachable", entry
+        else:
+            assert entry.get("untracked") is True, entry
 
 
 def test_api_projects_fetches_real_repos_with_real_token():
@@ -87,7 +96,10 @@ def test_api_projects_fetches_real_repos_with_real_token():
     assert resp.status_code == 200
     data = resp.json()
     names = {p["name"] for p in data["projects"]}
-    assert names == {"my-website", "DARKHELIX", "redqueen-website", "server"}
+    assert names == {p["name"] for p in srv.TRACKED_PROJECTS}
+    has_tracker = {p["name"] for p in srv.TRACKED_PROJECTS if p.get("path")}
     for p in data["projects"]:
         assert "error" not in p, f"{p['name']} failed to fetch: {p}"
-        assert "total" in p
+        # Counts only exist where there is a tracker file to count.
+        if p["name"] in has_tracker:
+            assert "total" in p
