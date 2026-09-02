@@ -111,11 +111,22 @@ function swVisibleItems(panel){
 function swFiledBadge(item){
   const filed = item.filed_as;
   if(!filed) return "";
+  // A decomposed card parks in `todo` while its leaves do the work, so its own
+  // status is the least useful thing about it. The server rolls the leaves up
+  // into effective_status; show that, and keep the card's real status in the
+  // tooltip rather than dropping it -- "todo" is still the answer to "what
+  // will the board do with this card", it is just not the answer to "is
+  // anything happening".
+  const shown = filed.effective_status || filed.status;
   const cls = (typeof KANBAN_STATUS_CLASS !== "undefined"
-               ? KANBAN_STATUS_CLASS[filed.status] : "") || "";
+               ? KANBAN_STATUS_CLASS[shown] : "") || "";
+  const why = filed.effective_status
+    ? ` — card itself is ${filed.status}, waiting on subtask ${filed.wip_via || "?"}`
+      + ` (${filed.wip_via_status || "active"})`
+    : "";
   return `<span class="sw-filed" data-card="${submitWorkEsc(filed.id)}"
-    title="Already filed as ${submitWorkEsc(filed.id)} — click to open its run log"
-    >filed · <b class="${cls}">${submitWorkEsc(filed.status || "?")}</b></span>`;
+    title="Already filed as ${submitWorkEsc(filed.id)}${submitWorkEsc(why)} — click to open its run log"
+    >filed · <b class="${cls}">${submitWorkEsc(shown || "?")}</b></span>`;
 }
 
 function swRow(item, state){
@@ -224,7 +235,10 @@ function submitWorkRenderSelected(panel){
     ? `<div class="sw-selected-filed">Already filed as
          <a href="#" class="sw-open-card" data-card="${submitWorkEsc(item.filed_as.id)}"
             >${submitWorkEsc(item.filed_as.id)}</a>
-         (${submitWorkEsc(item.filed_as.status || "?")}). Submitting with no extra
+         (${submitWorkEsc(item.filed_as.status || "?")}${item.filed_as.effective_status
+            ? ", subtask " + submitWorkEsc(item.filed_as.wip_via || "?")
+              + " " + submitWorkEsc(item.filed_as.wip_via_status || "active")
+            : ""}). Submitting with no extra
          instructions returns that same card rather than making a second one.</div>`
     : "";
   box.innerHTML = `<div class="sw-selected-section">${submitWorkEsc(item.section || "")}</div>
@@ -280,7 +294,8 @@ async function swLoadParentCards(panel){
    when this string moves. */
 function swItemsSignature(items){
   return items.map(it => [it.id, it.blocked, it.needs_ui, it.wip,
-                          it.filed_as ? it.filed_as.id + ":" + it.filed_as.status : ""
+                          it.filed_as ? it.filed_as.id + ":" + it.filed_as.status
+                                        + ":" + (it.filed_as.effective_status || "") : ""
                          ].join("~")).join("|");
 }
 

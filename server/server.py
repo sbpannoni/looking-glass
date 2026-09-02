@@ -4935,6 +4935,72 @@ def _submission_key(title: str, body: str) -> str:
     return "lg-" + hashlib.sha256(f"{title}\n{body}".encode("utf-8")).hexdigest()[:32]
 
 
+# ------------------------------------------------- decomposed-card roll-up
+# A decomposed card's own status is not its state. The auto-decomposer keeps
+# the filed card alive and makes it DEPEND ON every leaf it produced -- the
+# same inversion _darkhelix_lineage documents -- so the instant a card fans
+# out it parks in `todo` and stays there for as long as the leaves are doing
+# the work. Read the root's own status and you get "todo" for a card whose
+# worker is running right now.
+#
+# That is not an edge case here: /api/kanban/create always files --triage, and
+# triage is always decomposed, so EVERY card the SUBMIT WORK panel files ends
+# up in exactly this shape. The write-back's WIP arm (`running`/`ready`/
+# `review`) therefore never fired for a HUD-filed item even once -- verified
+# live on t_790a28ee, whose four leaves were mid-refactor while TODO.md showed
+# an untouched, unmarked box. A write-back that cannot mark work in progress
+# is missing half of what it exists to do.
+#
+# So roll the leaves up: a `todo` card with dependencies is doing whatever its
+# dependencies are doing.
+_ROLLUP_MAX_CARDS = 24
+_ROLLUP_CONCURRENCY = 4
+# Which leaf to name in the tooltip when several are live. Not the same order
+# as _TODO_WIP_STATUSES, which is a membership test and whose order carries no
+# meaning: a leaf in `review` is further along than one merely `ready`.
+_ROLLUP_REPORT_ORDER = ("running", "review", "ready")
+
+
+async def _rollup_effective_status(cards: list[dict],
+                                   statuses: dict[str, str]) -> None:
+    """Annotate each fanned-out card with the state of the leaves it waits on.
+
+    In place, and best-effort: a detail call that fails leaves the card
+    reading its own status, which is the old behaviour rather than an error --
+    a badge is not worth a 502 on the picker.
+
+    `status` itself is never overwritten. A card that claims to be `running`
+    when the board says `todo` is just a different wrong answer, and the card
+    id in the badge has to keep leading to the card it names. The rolled-up
+    view goes in `effective_status` alongside, and `wip_via` names the leaf it
+    came from so the tooltip can say *why* a `todo` card reads as working."""
+    sem = asyncio.Semaphore(_ROLLUP_CONCURRENCY)
+
+    async def one(card: dict) -> None:
+        async with sem:
+            try:
+                detail = await _kanban_task_detail(card["id"])
+            except Exception:
+                return
+        # `parents` is the dependency direction: the leaves this card waits on.
+        leaves = list((detail.get("links") or {}).get("parents") or [])
+        active = [leaf for leaf in leaves
+                  if statuses.get(leaf) in _TODO_WIP_STATUSES]
+        if not active:
+            return
+        # Report the furthest-along leaf, not whichever came back first. All
+        # three states mark the box WIP identically, so this changes no
+        # decision -- it changes what the tooltip is able to say truthfully,
+        # and "waiting on a subtask that is running" is a claim worth only
+        # making about a leaf that is actually running.
+        leaf = min(active, key=lambda i: _ROLLUP_REPORT_ORDER.index(statuses[i]))
+        card["effective_status"] = "running"
+        card["wip_via"] = leaf
+        card["wip_via_status"] = statuses[leaf]
+
+    await asyncio.gather(*(one(card) for card in cards))
+
+
 async def _submitted_keys() -> tuple[dict[str, dict], dict[str, dict]]:
     """({submission key -> card}, {card title -> card}) for the whole board.
 
@@ -4960,15 +5026,28 @@ async def _submitted_keys() -> tuple[dict[str, dict], dict[str, dict]]:
         "/api/plugins/kanban/board?include_archived=true")
     keys: dict[str, dict] = {}
     titles: dict[str, dict] = {}
+    statuses: dict[str, str] = {}
+    fanned_out: list[dict] = []
     for column in board.get("columns") or []:
         for task in column.get("tasks") or []:
             card = {"id": task.get("id"), "status": task.get("status")}
+            statuses[card["id"]] = card["status"]
+            # A card that was decomposed sits in `todo` while its leaves work.
+            # Collect those for the roll-up below; every other status already
+            # reports its own truth. The same dict object goes into both
+            # indexes, so annotating it here reaches the key and title paths
+            # alike.
+            if card["status"] == "todo" and (
+                    (task.get("link_counts") or {}).get("parents") or 0):
+                fanned_out.append(card)
             key = task.get("idempotency_key")
             if key:
                 keys[key] = card
             title = (task.get("title") or "").strip()
             if title:
                 titles.setdefault(title, card)
+    if fanned_out:
+        await _rollup_effective_status(fanned_out[:_ROLLUP_MAX_CARDS], statuses)
     return keys, titles
 
 
@@ -5058,7 +5137,10 @@ def _todo_apply_board_state(text: str, items: list[dict],
         if not m:
             continue
         rest = m.group(2)
-        status = card.get("status")
+        # Rolled-up first: a decomposed card's leaves are the work, and its
+        # own `todo` says nothing about them. Falls back to the card's own
+        # status, which is what an undecomposed card has.
+        status = card.get("effective_status") or card.get("status")
         if status == "done":
             # Drop the status tag as part of ticking: a **WIP** box that is
             # also checked contradicts itself.
