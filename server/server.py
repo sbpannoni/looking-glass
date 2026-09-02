@@ -1380,7 +1380,28 @@ async def brain() -> JSONResponse:
 # project with no checkout anywhere in the fleet is tracked but unowned — that is
 # a real state worth seeing, not a gap to paper over.
 def _ownership_cfg() -> dict:
-    return CFG.get("ownership") or {}
+    """Fleet ownership, read from claude-config rather than kept inline here.
+
+    The map used to live in three places -- CT110's CLAUDE.md, CT112's, and an
+    inline `ownership:` block in this gitignored server.yaml -- and the copy
+    that drove this view was the one with no backup. It now lives once, in
+    `claude-config/fleet/ownership.yaml`, which every node can pull and (since
+    2026-09-01) CT110 and CT112 can push.
+
+    A missing or broken file raises rather than falling back to an inline copy.
+    A stale fallback is exactly the failure this consolidation exists to end:
+    the view would keep rendering a map nobody could account for. Loud is
+    correct here -- the panel shows the error.
+    """
+    own = CFG.get("ownership") or {}
+    src = own.get("source")
+    if not src:
+        return own
+    with open(src) as fh:
+        loaded = yaml.safe_load(fh) or {}
+    if not loaded.get("domains"):
+        raise RuntimeError(f"{src} has no `domains` -- refusing to serve an empty map")
+    return loaded
 
 
 @app.get("/api/ownership")
@@ -1395,7 +1416,16 @@ async def ownership() -> JSONResponse:
     Live up/down is joined in from the topology poller so the diagram doubles as
     a status view rather than a static picture.
     """
-    cfg = _ownership_cfg()
+    try:
+        cfg = _ownership_cfg()
+    except Exception as exc:
+        # The source of truth is a file in another repo's checkout. If it is
+        # gone, say so on the panel instead of rendering nothing and letting it
+        # read as "the fleet has no domains".
+        return JSONResponse({
+            "domains": [], "virt": {}, "unowned": [],
+            "error": f"ownership source unreadable: {exc}",
+        }, status_code=200)
     up = {n["id"]: n.get("up") for n in (NETWORK_TOPOLOGY_STATE.get("nodes") or [])}
     virt = cfg.get("virt") or {}
 

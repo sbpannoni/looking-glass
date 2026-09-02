@@ -1,9 +1,21 @@
-# Hermes-side components (deployed to CT111, mirrored here)
+# Hermes-side components (deployed to CT111)
+
+> **The backup of record moved, 2026-09-01.** These files are now captured in
+> `claude-config/hosts/hermes/` — `plugins/<name>/`, the profile configs, and
+> `config.yaml` — by `hosts/hermes/sync.sh`, run from this box (CT112 is the
+> only node with both a checkout of that repo and a route to CT111). Back up
+> with `./sync.sh backup`, and check drift with `./sync.sh diff`.
+>
+> This directory stays as the **explanation**: the write-ups below are why each
+> plugin exists and what it cost to learn, which is not something a redacted
+> config dump carries. The code here is a reading copy. When the two disagree,
+> `sync.sh diff` against the live box settles it — not this directory.
+>
+> Keeping one box's config in two repos is what made the Hermes plugins the
+> only part of CT111 with no real backup for three weeks.
 
 These are **not loaded from this repo**. They live on CT111 under
-`~/.hermes/`, which has no version control, so copies are kept here so the
-mechanism is reviewable and recoverable. Editing a file here changes nothing
-until it is deployed.
+`~/.hermes/`. Editing a file here changes nothing until it is deployed.
 
 | file | deployed to | what it does |
 |---|---|---|

@@ -53,6 +53,15 @@ async function renderFlow(panel){
   try{
     const r = await fetch("/api/ownership");
     const j = await r.json();
+    if(j.error){
+      // The map now lives in claude-config, not in this app's config. A missing
+      // checkout must read as "the source is gone", never as "no domains".
+      panel.innerHTML = `<div class="flow-head-bar">WHERE WORK LIVES</div>
+        <div class="flow-unowned"><b>Ownership source unreadable</b> — ${j.error}.
+        The map lives in <code>claude-config/fleet/ownership.yaml</code>;
+        this box needs that checkout present.</div>`;
+      return;
+    }
     const cards = (j.domains||[]).map(flowCard).join("");
     const unowned = (j.unowned||[]).length
       ? `<div class="flow-unowned"><b>Tracked but unowned</b> — no checkout anywhere in the fleet,
