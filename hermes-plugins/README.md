@@ -9,12 +9,46 @@ until it is deployed.
 |---|---|---|
 | `darkhelix-isolation.py` | `~/.hermes/plugins/darkhelix-isolation/__init__.py` | `kanban_task_claimed` hook → calls this HUD's `/api/kanban/provision`, so every card gets an isolated worktree regardless of who created it |
 | `darkhelix-engine.py` | `~/.hermes/plugins/darkhelix-engine/__init__.py` | registers the `dispatch_to_engine` tool — the whole engine round trip as code |
+| `darkhelix-triage-guard.py` | `~/.hermes/plugins/darkhelix-triage-guard/__init__.py` | `kanban_task_blocked` hook → parks a loop-broken card in `blocked` instead of `triage`, so the auto-decomposer cannot fan it out again before a human sees it |
+| `darkhelix-triage-guard.plugin.yaml` | `~/.hermes/plugins/darkhelix-triage-guard/plugin.yaml` | its manifest — **without a `plugin.yaml` the loader silently ignores the directory**, and `hermes plugins list` simply does not mention it |
 | `coder-profile-config.yaml` | `~/.hermes/profiles/coder/config.yaml` | the assignee profile: enables the `darkhelix` plugin and toolset for workers |
 | `execution-engine-dispatch.SKILL.md` | `~/.hermes/profiles/coder/skills/software-development/execution-engine-dispatch/SKILL.md` | what is left for the worker once the mechanics are a tool: diagnosis |
 
-Both plugins are enabled in `~/.hermes/config.yaml` under `plugins.enabled`.
+All three plugins are enabled in `~/.hermes/config.yaml` under `plugins.enabled`.
 `darkhelix-isolation` needs a `config.json` beside it holding the HUD URL and
 token (mode 600, not mirrored here — it is a secret).
+`darkhelix-triage-guard` is additionally enabled in **every** profile that works
+cards (coder, darkhelix, bioinformatics, researcher, sysadmin, ai-tune), with a
+`plugins/` symlink in each — see the per-HERMES_HOME trap below; the block it
+has to catch is issued by the worker, not the gateway.
+
+## Why the triage guard exists (2026-09-01)
+
+`block_task` treats the second re-block for the same cause as an unblock loop
+and routes the card to `triage` — its comment says "for a human-in-the-loop
+decision", on the assumption that `blocked` is where a cron spins and `triage`
+is where a human looks. Here that is inverted: nothing auto-drains `blocked`
+(no unblock cron on CT111), while `triage` is drained by the gateway's
+`_auto_decompose_tick` every 60s, and `decompose_task` guards only on
+`status == 'triage'` — it never checks whether the card was already decomposed.
+
+t_d17fef80 paid for it: `block_loop_detected` at 20:44, `decomposed` at 20:45
+into four children that re-asked the four questions the 12:47 fan-out had
+already answered — 2h37m of worker time, and the two waves returned opposite
+answers to the same patch-vs-rebuild question. Reproduced again while testing
+this guard: a card left in `triage` was picked up by the decomposer, had its
+title and body rewritten by `specify`, was promoted, and had a worker spawned
+on it, all inside one 60s tick.
+
+The guard does not touch `auto_decompose`. A genuinely new card still fans out
+on the next tick, which is the behaviour that produced this board's useful work.
+
+**Testing it:** a plain `hermes kanban block` from the shell will NOT fire the
+hook — `discover_plugins()` runs on agent/gateway startup paths (`cli.py`,
+`gateway/run.py`), not in a short-lived CLI invocation, so the plugin manager
+in that process is empty. Drive `kb.block_task` from one Python process that
+called `discover_plugins()` first; that is what a worker session
+(`hermes -p coder --cli … chat`) actually is.
 
 ## Two traps that cost a full debug cycle each (2026-08-28)
 

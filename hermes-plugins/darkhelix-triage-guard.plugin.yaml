@@ -1,0 +1,6 @@
+name: darkhelix-triage-guard
+version: 1.0.0
+description: "Park a loop-broken card in `blocked` instead of `triage`, so the gateway auto-decomposer cannot fan it out a second time before a human sees it."
+author: "Looking Glass (CT112)"
+hooks:
+  - kanban_task_blocked
