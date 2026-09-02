@@ -788,6 +788,14 @@ body.view-map #work-area{display:none !important}
 .flow-repo{font-size:10px; color:var(--magenta); margin-top:2px; letter-spacing:.5px}
 .flow-agent{font-size:10px; letter-spacing:1px; margin-top:6px; text-transform:uppercase}
 .flow-steward{font-size:10px; color:var(--amber); margin-top:3px}
+/* A lease is a boundary that is deliberately down. Magenta rather than amber:
+   amber already means "no agent here", and a lease is the opposite problem —
+   an extra writer, not a missing one. The dashed left edge is meant to read as
+   provisional every time the view is opened. */
+.flow-card.leased{border-top-color:var(--magenta)}
+.flow-lease{font-size:10px; color:var(--magenta); margin-top:4px;
+  border-left:2px dashed var(--magenta); padding-left:6px; line-height:1.45}
+.flow-lease-until{display:block; color:var(--txt-dim); letter-spacing:.5px}
 .flow-owns{margin:6px 0 0 14px; padding:0; font-size:11px; color:var(--txt-dim)}
 .flow-owns li{margin:1px 0}
 .flow-projects{margin-top:7px; display:flex; flex-wrap:wrap; gap:4px}

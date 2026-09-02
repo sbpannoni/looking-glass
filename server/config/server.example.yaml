@@ -208,6 +208,16 @@ ownership:                   # Who owns what, and which agent has native context
       repo: null
       agent: none              # no Claude installed on CT111
       steward: claude-control   # so infra drives it over ssh
+      # Optional. A TEMPORARY grant letting one other node's agent write here,
+      # for a defect that spans two domains and cannot be closed from either
+      # side alone. `until` is an exit condition in plain words, not a date --
+      # when it is met, delete the block and the boundary is back. Rendered on
+      # the card so a lease that quietly became permanent stays visible.
+      # lease:
+      #   to: looking-glass
+      #   since: "2026-09-01"
+      #   until: "the kanban + engine bugs are worked out"
+      #   why: "one agent has to hold both halves of a defect spanning two nodes"
       owns: ["SOUL.md / MEMORY.md", "profiles · skills · toolsets", "kanban board"]
       note: "Vendor build v0.20.0 at /usr/local/lib/hermes-agent — configure it, don't patch it. /root/hermes-elite is a profile bundle, not source."
     - id: brain

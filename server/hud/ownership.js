@@ -22,11 +22,18 @@ function flowCard(d){
   const dot    = d.online===false ? "off" : (d.online ? "on" : "na");
   const agent  = AGENT_LABEL[d.agent] || d.agent || "";
   const stew   = d.steward ? `<div class="flow-steward">↳ driven from <b>${d.steward}</b> over ssh</div>` : "";
+  // A lease is a boundary that is currently DOWN. Always render it with its
+  // exit condition: the failure mode of a temporary grant is nobody noticing
+  // it stopped being temporary, so a lease with no `until` says so out loud.
+  const lease  = d.lease
+    ? `<div class="flow-lease">⇄ open to <b>${d.lease.to}</b>${d.lease.since?" since "+d.lease.since:""}
+         <span class="flow-lease-until">until ${d.lease.until || "— NO EXIT CONDITION SET"}</span></div>`
+    : "";
   const owns   = (d.owns||[]).map(o=>`<li>${o}</li>`).join("");
   const proj   = (d.projects||[]).map(p=>`<span class="flow-proj">${p}</span>`).join("");
   const repo   = d.repo ? `<div class="flow-repo">${d.repo}</div>` : "";
   const note   = d.note ? `<div class="flow-note">${d.note}</div>` : "";
-  return `<div class="flow-card ${d.agent==="none"?"noagent":""}">
+  return `<div class="flow-card ${d.agent==="none"?"noagent":""} ${d.lease?"leased":""}">
     <div class="flow-head">
       <span class="dot ${dot}"></span><b>${d.label}</b>
     </div>
@@ -35,6 +42,7 @@ function flowCard(d){
     ${repo}
     <div class="flow-agent ${d.agent==="none"?"err":"ok"}">${agent}</div>
     ${stew}
+    ${lease}
     ${owns?`<ul class="flow-owns">${owns}</ul>`:""}
     ${proj?`<div class="flow-projects">${proj}</div>`:""}
     ${note}
