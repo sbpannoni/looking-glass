@@ -5051,6 +5051,358 @@ async def _submitted_keys() -> tuple[dict[str, dict], dict[str, dict]]:
     return keys, titles
 
 
+# ------------------------------------------------------ download backlog
+# Nine of TODO.md's items are blocked on a database or a binary that nobody has
+# downloaded. They are not model work -- they are bytes, time and then an edit
+# to conform to whatever format the pipeline actually reads -- but they were
+# stuck in the same queue as model work, behind a board that runs ONE card at a
+# time on ONE GPU seat. A 110 GB GTDB-Tk pull would hold that seat for hours
+# while doing nothing a GPU is for.
+#
+# So a download is filed as a card and immediately PARKED in `scheduled`.
+# `schedule_task` (kanban_db.py:7933) makes a card explicitly not dispatchable
+# -- "waiting on time, not human input" -- so it is visible on the board, has a
+# real id to comment on and attach to, and cannot take the seat. The bytes are
+# then pulled by wget on snarf, off the board entirely.
+#
+# Two things this refuses to do, both learned the same way:
+#
+#   * invent a URL. Every entry is checked live before it is offered, and a
+#     blocked item with no catalogue entry is reported as "needs a URL" rather
+#     than guessed at. The seed catalogue was written by probing: GTDB-Tk's
+#     full_package and the Mash RefSeq sketch answer 200, and a plausible
+#     ConoServer path answered 404 -- so it is not in the file.
+#   * pretend the download is the job. Every entry carries `wire_in`, because
+#     the reason these sat blocked is that the bytes are the easy half.
+_DOWNLOADS_PATH = ROOT / "config" / "downloads.yaml"
+_DOWNLOADS_CACHE: dict = {"mtime": 0.0, "entries": []}
+_URL_CHECK_TTL = 900.0
+_URL_CHECKS: dict = {}
+# Downloads run here so a failed pull leaves its log somewhere durable rather
+# than in whatever /tmp a shell happened to be in.
+_DOWNLOAD_LOG_DIR = "/ssdpool/agent-work/downloads"
+
+
+def _download_catalogue() -> list[dict]:
+    """The catalogue, re-read when the file changes.
+
+    Not cached for a TTL: this is a backlog that grows while you are looking at
+    it, and an operator who adds a URL should see it on the next refresh
+    without restarting the server."""
+    try:
+        stat = _DOWNLOADS_PATH.stat()
+    except OSError:
+        return []
+    if _DOWNLOADS_CACHE["mtime"] != stat.st_mtime:
+        try:
+            data = yaml.safe_load(_DOWNLOADS_PATH.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return _DOWNLOADS_CACHE["entries"]
+        _DOWNLOADS_CACHE.update({"mtime": stat.st_mtime,
+                                 "entries": data.get("entries") or []})
+    return _DOWNLOADS_CACHE["entries"]
+
+
+def _download_entry_for(text: str) -> dict | None:
+    low = (text or "").lower()
+    for entry in _download_catalogue():
+        match = (entry.get("match") or "").lower()
+        if match and match in low:
+            return entry
+    return None
+
+
+async def _check_url(url: str) -> dict:
+    """Does this URL actually answer? Checked FROM SNARF, which is the host
+    that will do the downloading -- checking from CT112 would prove the wrong
+    thing about a mirror that geo-routes or blocks."""
+    now = time.time()
+    hit = _URL_CHECKS.get(url)
+    if hit and now - hit["at"] < _URL_CHECK_TTL:
+        return hit["result"]
+    # Headers to stdout, status appended by -w. Content-Length is read out of
+    # the headers rather than from a -w variable: snarf's curl does not carry
+    # %{content_length_download}, and a missing write-out variable makes the
+    # whole call fail rather than just that field.
+    cmd = ("timeout 25 curl -sS -L --head "
+           f"-w '\\nSTATUS %{{http_code}} %{{url_effective}}\\n' {shlex.quote(url)}")
+    try:
+        rc, out = await _fleet_ssh("snarf", cmd)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    status, final, length = "", url, None
+    for line in (out or "").splitlines():
+        low = line.lower()
+        if low.startswith("content-length:"):
+            try:
+                length = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+        elif line.startswith("STATUS "):
+            bits = line.split(None, 2)
+            status = bits[1] if len(bits) > 1 else ""
+            final = bits[2] if len(bits) > 2 else url
+    result = {"ok": status == "200", "status": status,
+              "bytes": length, "final_url": final}
+    _URL_CHECKS[url] = {"at": now, "result": result}
+    return result
+
+
+async def _dest_state(dest: str) -> dict:
+    """Whether the destination already holds something, and how much."""
+    q = shlex.quote(dest)
+    # `du -sb` (apparent size), not `du -sh`: /ssdpool is compressed ZFS, so
+    # disk usage is not file size. The mash sketch reads 413M by blocks and is
+    # a complete 754 MB file -- comparing the first number against a remote
+    # Content-Length would call a finished download a partial one forever.
+    try:
+        rc, out = await _fleet_ssh(
+            "snarf",
+            f"if [ -e {q} ]; then du -sb {q} 2>/dev/null | cut -f1; else echo ABSENT; fi")
+    except Exception as exc:
+        return {"present": None, "error": str(exc)}
+    text = (out or "").strip()
+    if text == "ABSENT" or not text:
+        return {"present": False}
+    try:
+        return {"present": True, "bytes": int(text)}
+    except ValueError:
+        return {"present": True, "bytes": None}
+
+
+def _download_card_text(item: dict, entry: dict) -> tuple[str, str]:
+    """Title and body of the card a download is filed as.
+
+    The body carries the exact command rather than a description of it: this
+    card is picked up by a person or by the runner below, and "download the
+    GTDB-Tk package" is the instruction that produced nine blocked items in the
+    first place."""
+    name = entry.get("name") or entry.get("id")
+    dest = entry["dest"]
+    url = entry["url"]
+    unpack = ""
+    if entry.get("archive"):
+        unpack = (f"\ntar -xzf {dest}/$(basename {url}) -C {dest}\n"
+                  "# then remove the tarball once the unpack verifies")
+    body = (
+        f"Download blocked dependency: {name}\n\n"
+        f"TODO.md item:\n{item.get('text', '').strip()}\n\n"
+        "--- how ---\n"
+        f"On snarf, as sam:\n\n"
+        f"mkdir -p {dest if not entry.get('archive') else dest}\n"
+        f"wget -c -P {dest} {url}{unpack}\n\n"
+        f"approx size: {entry.get('approx') or 'unknown'}\n\n"
+        "--- wire-in (this is the half that is not the download) ---\n"
+        f"{(entry.get('wire_in') or '').strip()}\n\n"
+        "--- notes ---\n"
+        f"{dest} is in the SHARED pool: every worktree symlinks database/ back "
+        "to it, and the pool manifest only watches database/collab_refs, so a "
+        "write here is not attributable after the fact. Say on this card what "
+        "you changed.\n"
+        "This card is parked in `scheduled` on purpose -- it is not "
+        "dispatchable and does not consume the single model seat."
+    )
+    return f"Download: {name}", body
+
+
+@app.get("/api/darkhelix/downloads")
+async def darkhelix_downloads() -> JSONResponse:
+    """The download backlog: every TODO item blocked on a database or binary,
+    joined with a verified URL where we have one."""
+    try:
+        rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(DARKHELIX_TODO_PATH)}")
+    except Exception as exc:
+        return JSONResponse({"items": [], "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"items": [], "error": f"cat exited {rc}"}, status_code=502)
+
+    blocked = [i for i in _parse_darkhelix_todo(out) if i.get("blocked")]
+    try:
+        filed, filed_titles = await _submitted_keys()
+    except Exception:
+        filed, filed_titles = {}, {}
+
+    rows: list[dict] = []
+    for item in blocked:
+        entry = _download_entry_for(item.get("text", ""))
+        row = {"id": item.get("id"), "title": item.get("title"),
+               "text": item.get("text"), "entry": None, "card": None}
+        if entry:
+            title, body = _download_card_text(item, entry)
+            url_state, dest_state = await asyncio.gather(
+                _check_url(entry["url"]), _dest_state(entry["dest"]))
+            row["entry"] = {"id": entry.get("id"), "name": entry.get("name"),
+                            "url": entry["url"], "dest": entry["dest"],
+                            "approx": entry.get("approx"),
+                            "archive": entry.get("archive"),
+                            "wire_in": entry.get("wire_in"),
+                            "url_state": url_state, "dest_state": dest_state}
+            # The useful verdict, not two numbers for a reader to compare:
+            # "already there" is the difference between a card worth filing and
+            # one that would re-pull 110 GB over a finished download.
+            remote = url_state.get("bytes")
+            local = dest_state.get("bytes")
+            if not dest_state.get("present"):
+                row["entry"]["state"] = "missing"
+            elif entry.get("archive"):
+                # An unpacked tree is a different size from its tarball, so the
+                # comparison below says nothing. Presence is all we can claim.
+                row["entry"]["state"] = "present"
+            elif remote and local and local >= remote:
+                row["entry"]["state"] = "complete"
+            elif remote and local:
+                row["entry"]["state"] = "partial"
+            else:
+                row["entry"]["state"] = "present"
+            row["card"] = filed.get(_submission_key(title, body)) or filed_titles.get(title)
+        rows.append(row)
+    return JSONResponse({"items": rows, "catalogue": len(_download_catalogue())})
+
+
+@app.post("/api/darkhelix/downloads/schedule")
+async def darkhelix_download_schedule(request: Request) -> JSONResponse:
+    """File one download as a card and park it in `scheduled`.
+
+    Two steps, not one: `hermes kanban create` has no way to open a card in
+    `scheduled`, so the card is created and then parked. It is never left in a
+    dispatchable state in between -- created cards land in `todo`, and `todo`
+    is not polled the way `triage` is."""
+    payload = await request.json()
+    item_id = (payload.get("item_id") or "").strip()
+    try:
+        rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(DARKHELIX_TODO_PATH)}")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    item = next((i for i in _parse_darkhelix_todo(out) if i.get("id") == item_id), None)
+    if not item:
+        return JSONResponse({"ok": False, "error": "no such TODO item"}, status_code=400)
+    entry = _download_entry_for(item.get("text", ""))
+    if not entry:
+        return JSONResponse(
+            {"ok": False, "error": "no catalogue entry for that item -- add a "
+                                   "verified URL to server/config/downloads.yaml"},
+            status_code=400)
+    url_state = await _check_url(entry["url"])
+    if not url_state.get("ok"):
+        return JSONResponse(
+            {"ok": False, "error": f"{entry['url']} answered "
+                                   f"{url_state.get('status') or url_state.get('error')} "
+                                   "-- not filing a card with a dead URL"},
+            status_code=400)
+
+    title, body = _download_card_text(item, entry)
+    assignee = ((CFG.get("darkhelix") or {}).get("downloads_assignee")
+                or "bioinformatics")
+    cmd = (
+        "hermes kanban create "
+        f"{shlex.quote(title[:200])} --body {shlex.quote(body)} "
+        f"--workspace scratch --assignee {shlex.quote(assignee)} "
+        f"--idempotency-key {shlex.quote(_submission_key(title, body))} "
+        f"--created-by {_HUD_CREATOR} --json"
+    )
+    try:
+        rc, out = await _kanban_ssh(cmd)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": out[-1500:]}, status_code=502)
+    try:
+        data = json.loads(out.strip())
+    except json.JSONDecodeError:
+        return JSONResponse({"ok": False, "error": f"unparseable: {out[-300:]}"},
+                            status_code=502)
+    task_id = str(data.get("id") or data.get("task_id") or "")
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "no task id returned"}, status_code=502)
+
+    reason = ("parked: bulk download, runs off the board so it never takes the "
+              "single model seat")
+    rc, park = await _kanban_ssh(
+        f"hermes kanban schedule {shlex.quote(task_id)} {shlex.quote(reason)}")
+    return JSONResponse({"ok": True, "task_id": task_id,
+                         "scheduled": rc == 0,
+                         "schedule_error": None if rc == 0 else park[-400:]})
+
+
+@app.post("/api/darkhelix/downloads/run")
+async def darkhelix_download_run(request: Request) -> JSONResponse:
+    """Start the pull on snarf, detached, and comment the log path on the card.
+
+    `wget -c` on purpose: these are big and the link is not guaranteed, so a
+    second run resumes rather than restarting. The process is nohup'd and NOT
+    waited on -- an HTTP request must not own a 110 GB transfer."""
+    payload = await request.json()
+    entry_id = (payload.get("entry_id") or "").strip()
+    task_id = (payload.get("task_id") or "").strip()
+    entry = next((e for e in _download_catalogue() if e.get("id") == entry_id), None)
+    if not entry:
+        return JSONResponse({"ok": False, "error": "no such catalogue entry"},
+                            status_code=400)
+    if task_id and not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+
+    dest, url = entry["dest"], entry["url"]
+    log = f"{_DOWNLOAD_LOG_DIR}/{entry_id}.log"
+    # One at a time per entry: a second wget onto the same partial file is how
+    # you get a corrupt archive that checksums differently on every retry.
+    guard = (f"pgrep -af {shlex.quote(url)} >/dev/null && "
+             "{ echo ALREADY_RUNNING; exit 0; }; ")
+    cmd = (
+        guard +
+        f"mkdir -p {shlex.quote(_DOWNLOAD_LOG_DIR)} {shlex.quote(dest)} && "
+        f"nohup wget -c -P {shlex.quote(dest)} {shlex.quote(url)} "
+        f">> {shlex.quote(log)} 2>&1 < /dev/null & "
+        "echo STARTED $!"
+    )
+    try:
+        rc, out = await _fleet_ssh("snarf", cmd)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    text = (out or "").strip()
+    started = text.startswith("STARTED")
+    if task_id and started:
+        note = (f"Download started on snarf: {url}\n"
+                f"-> {dest}\nlog: {log}\n"
+                "Card stays `scheduled` until the bytes are down and the "
+                "wire-in step is done.")
+        try:
+            await asyncio.to_thread(
+                _kanban_api_call, "POST",
+                f"/api/plugins/kanban/tasks/{quote(task_id)}/comments",
+                json={"author": _HUD_CREATOR, "body": note})
+        except Exception:
+            pass
+    return JSONResponse({"ok": started or "ALREADY_RUNNING" in text,
+                         "state": "running" if "ALREADY_RUNNING" in text
+                                  else ("started" if started else "failed"),
+                         "log": log, "output": text[-300:]})
+
+
+@app.get("/api/darkhelix/downloads/progress")
+async def darkhelix_download_progress(entry_id: str) -> JSONResponse:
+    """How far along a running pull is: the tail of its log and what is on
+    disk. Read on demand -- polling a 110 GB transfer for a progress bar is
+    more ssh traffic than the answer is worth."""
+    entry = next((e for e in _download_catalogue() if e.get("id") == entry_id), None)
+    if not entry:
+        return JSONResponse({"ok": False, "error": "no such catalogue entry"},
+                            status_code=400)
+    log = f"{_DOWNLOAD_LOG_DIR}/{entry_id}.log"
+    q = shlex.quote(entry["url"])
+    try:
+        rc, out = await _fleet_ssh(
+            "snarf",
+            f"pgrep -af {q} >/dev/null && echo RUNNING || echo IDLE; "
+            f"tail -c 1200 {shlex.quote(log)} 2>/dev/null | tr '\\r' '\\n' | tail -6")
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    lines = (out or "").splitlines()
+    state = lines[0].strip() if lines else "IDLE"
+    dest_state = await _dest_state(entry["dest"])
+    return JSONResponse({"ok": True, "state": state.lower(),
+                         "tail": "\n".join(lines[1:]), "dest": dest_state})
+
+
 @app.get("/api/darkhelix-todo")
 async def darkhelix_todo() -> JSONResponse:
     """Real, current TODO.md items from DARKHELIX (snarf), for the SUBMIT

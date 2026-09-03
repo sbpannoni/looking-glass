@@ -2,7 +2,7 @@
 name: execution-engine-dispatch
 description: "Run a kanban card through the LangGraph+Aider execution engine on snarf via the dispatch_to_engine tool, and diagnose the result."
 version: 2.1.0
-author: Hermes Agent (coder profile)
+author: Hermes Agent
 license: MIT
 platforms: [linux]
 metadata:
@@ -13,8 +13,7 @@ metadata:
 
 ## When to use this skill
 
-You are the dispatched worker for a claimed kanban task in the `coder`
-profile. The dispatcher has already claimed the card before spawning you.
+You are the dispatched worker for a claimed kanban task. The dispatcher has already claimed the card before spawning you.
 
 **You do not edit code. You do not run git. You do not build shell commands.**
 All of that is inside the `dispatch_to_engine` tool. Your job is the one part

@@ -1,0 +1,44 @@
+# Database / binary download catalogue for the DARKHELIX backlog.
+#
+# TODO.md's "Blocked — missing database or binary" section says WHAT is
+# missing; it does not say where to get it. This file is the missing half, and
+# it is deliberately a tracked file rather than part of the gitignored
+# server.yaml: a URL is a fact worth reviewing in a diff.
+#
+# Nothing here is trusted on sight. Every `url` is checked live (an HTTP HEAD
+# from snarf) before the HUD offers it, and an entry whose URL does not answer
+# 200 is shown as unavailable rather than filed -- a card carrying a dead URL
+# costs an hour of somebody's afternoon. A blocked item with no entry at all is
+# listed as "needs a URL", which is an honest state and the thing to fix here.
+#
+# Fields:
+#   match    case-insensitive substring matched against the TODO item's text
+#   dest     where it lands on snarf. Under /ssdpool/DARKHELIX/database/ is the
+#            shared pool -- see docs/PIPELINE-VERIFICATION.md on what that means
+#   archive  set when the download is a tarball that has to be unpacked
+#   wire_in  what still has to be done after the bytes land. Downloads are
+#            rarely the whole job: most of these need an edit to conform to the
+#            format the pipeline actually reads.
+entries:
+  - id: gtdbtk
+    match: "GTDB-Tk reference package"
+    name: GTDB-Tk reference package
+    url: https://data.gtdb.ecogenomic.org/releases/latest/auxillary_files/gtdbtk_package/full_package/gtdbtk_data.tar.gz
+    dest: /ssdpool/DARKHELIX/database/gtdbtk
+    archive: tar.gz
+    approx: ~110 GB unpacked
+    wire_in: >-
+      Unpack, then point gd_gtdbtk_db at the release directory (the one holding
+      taxonomy/, fastani/, markers/). genome_discovery.py skips gd_run_gtdbtk by
+      design while it is unset, so the step is silently absent until this lands.
+
+  - id: mash-refseq
+    match: "mash sketch DB"
+    name: Mash RefSeq sketch (k21, s1000)
+    url: https://gembox.cbcb.umd.edu/mash/refseq.genomes.k21s1000.msh
+    dest: /ssdpool/DARKHELIX/database/mash/refseq.genomes.k21s1000.msh
+    approx: ~700 MB
+    wire_in: >-
+      DoMashPrefilter takes the .msh path directly. The lane has never been
+      exercised, so expect the first run to be the real test of the wiring, not
+      of the sketch.

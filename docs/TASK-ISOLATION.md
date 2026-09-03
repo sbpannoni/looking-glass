@@ -98,6 +98,38 @@ in scope when either:
 
 Anything else is left alone — see "when it fails" below for why that is safe.
 
+## The download backlog
+
+Nine TODO.md items are blocked on a database or a binary nobody has
+downloaded. They are not model work — bytes, time, then an edit to match the
+format the pipeline reads — but the only way onto the board was a card, and
+the board runs one card at a time on one GPU seat. A 110 GB pull would hold
+that seat for hours doing nothing a GPU is for.
+
+The **DOWNLOADS** pane (`GET /api/darkhelix/downloads`) joins those items with
+`server/config/downloads.yaml`, a tracked catalogue of verified URLs, and
+files each one as a card that is immediately parked in `scheduled` —
+`schedule_task` makes a card explicitly not dispatchable, so it is on the
+board with a real id to comment on and cannot take the seat. `wget -c` then
+runs detached on snarf, off the board entirely.
+
+Three claims it refuses to make:
+
+- **an unchecked URL.** Every entry is HEAD-checked from snarf, the host that
+  will do the downloading, and a blocked item with no entry reads "needs a
+  URL" rather than a guess. The seed catalogue lost a plausible ConoServer
+  path to a 404 that way.
+- **that a download is still needed.** On-disk size is compared against the
+  server's `Content-Length` — which found the Mash RefSeq sketch already
+  complete on snarf at 754,115,096 bytes, so that item is blocked on wire-in,
+  not on a download. Sizes are `du -sb` (apparent), because `/ssdpool` is
+  compressed ZFS and block usage reads 413M for that same file.
+- **that an unpacked archive is complete.** A tree is a different size from
+  its tarball, so an `archive:` entry reports presence and stops there.
+
+Every entry carries a `wire_in` line, because "the bytes are down" is where
+these items historically stop.
+
 ## Filing a swarm from the HUD
 
 `hermes kanban swarm` is the board's other shape: a root card that completes
