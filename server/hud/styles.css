@@ -1061,6 +1061,48 @@ button.tm-review-btn:disabled{opacity:.5; cursor:default; box-shadow:none}
   color:var(--txt); font-family:'Rajdhani'; font-size:12.5px; outline:none;
 }
 .sw-parent:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+
+/* ---- follow-up: what the parent concluded, and what it feeds ----
+   Scrolls on its own rather than growing the form column: a parent with a
+   long handoff and eight suggestions must not push Submit off the panel. */
+.sw-followup{
+  flex:0 1 auto; min-height:0; max-height:38%; overflow-y:auto;
+  margin:7px 9px 0; padding:0 0 4px;
+  border:1px solid var(--line); border-left:2px solid var(--cyan-dim);
+  border-radius:6px; background:color-mix(in srgb, var(--cyan) 4%, transparent);
+  scrollbar-width:thin; scrollbar-color:var(--line) transparent;
+}
+.sw-fu-head{
+  position:sticky; top:0; z-index:1; background:var(--bg);
+  font-family:'Orbitron'; font-size:8px; letter-spacing:1.6px; color:var(--txt-dim);
+  padding:6px 9px 4px; border-bottom:1px solid var(--line);
+}
+.sw-fu-sub{font-family:'Rajdhani'; font-size:10px; letter-spacing:0; opacity:.75}
+.sw-fu-summary{padding:7px 9px; font-size:12.5px; line-height:1.5; color:var(--txt)}
+.sw-fu-note{padding:7px 9px; font-size:12px; line-height:1.45; color:var(--txt-dim)}
+.sw-fu-note.err{color:var(--red)}
+.sw-fu-note code{color:var(--cyan); font-size:11.5px}
+.sw-fu-item{
+  padding:6px 9px; border-top:1px solid var(--line); cursor:pointer;
+}
+.sw-fu-item:hover{background:color-mix(in srgb, var(--cyan) 9%, transparent)}
+.sw-fu-item-title{font-size:12.5px; line-height:1.4; color:var(--txt)}
+.sw-fu-item-meta{display:flex; flex-wrap:wrap; gap:5px; margin-top:4px; align-items:center}
+/* The evidence, not a score: "matched engineering_detection.py" is checkable
+   and a rank number is not. */
+.sw-fu-why{
+  font-family:'Rajdhani'; font-size:10.5px; letter-spacing:0; color:var(--cyan);
+  border:1px solid var(--cyan-dim); border-radius:9px; padding:0 6px;
+  background:color-mix(in srgb, var(--cyan) 8%, transparent);
+}
+/* Loud on purpose: a suggestion that is already filed is the one case where
+   acting on the suggestion is the wrong move. */
+.sw-fu-item-filed{opacity:.72}
+.sw-fu-dup{
+  font-family:'Rajdhani'; font-size:10.5px; letter-spacing:0; color:var(--amber);
+  border:1px solid var(--amber); border-radius:9px; padding:0 6px;
+  background:color-mix(in srgb, var(--amber) 10%, transparent);
+}
 .sw-selected{
   flex:1 1 auto; min-height:0; overflow-y:auto; padding:9px;
   font-size:14px; line-height:1.5; color:var(--txt);

@@ -247,6 +247,7 @@ function submitWorkRenderSelected(panel){
     <div class="sw-selected-text">${submitWorkEsc(item.text).replace(/\n/g,"<br>")}</div>`;
   submitBtn.disabled = false;
   swRenderParentOptions(panel);
+  swRenderFollowUp(panel);
 }
 
 /* ---------------------------- builds on ------------------------------
@@ -272,6 +273,92 @@ function swRenderParentOptions(panel){
     sel.dataset.opts = want;
     sel.innerHTML = `<option value="">nothing — branch from origin/master</option>` + opts;
     sel.value = cards.some(c => c.id === keep) ? keep : "";
+    // The 20s poll rebuilds these options. If the parent we were showing
+    // findings for is gone, the findings below it are about nothing.
+    if(sel.value !== keep) swRenderFollowUp(panel);
+  }
+}
+
+/* --------------------------- follow-up ------------------------------
+   Picking a parent used to be a blind act: the dropdown gave you an id and a
+   title, and whether that card had actually concluded anything -- and which
+   TODO item its conclusion feeds -- lived in the card detail pane, or in a
+   terminal. So the control that exists to chain work told you nothing about
+   the work you were chaining to.
+
+   This shows the parent's real handoff (the run summary its worker wrote for
+   downstream tasks) and the open TODO items that handoff is evidence for,
+   ranked server-side by shared filenames and vocabulary. Clicking one selects
+   it, so "review the research, file the coding card against it" is two
+   clicks with the parent already set. Items that ALREADY have a card say so
+   loudly: suggesting related work is only half the job if it invites you to
+   file the same thing twice. */
+function swRenderFollowUp(panel){
+  const box = panel.querySelector(".sw-followup");
+  if(!box) return;
+  const state = swState(panel);
+  const fu = state.followUp;
+  const sel = panel.querySelector(".sw-parent");
+  if(!sel || !sel.value){ box.innerHTML = ""; box.hidden = true; return; }
+  box.hidden = false;
+  if(state.followUpLoading){ box.innerHTML = `<div class="sw-fu-note">reading parent handoff…</div>`; return; }
+  if(!fu || fu.parentId !== sel.value){ box.innerHTML = ""; return; }
+  if(fu.error){
+    box.innerHTML = `<div class="sw-fu-note err">${submitWorkEsc(fu.error)}</div>`;
+    return;
+  }
+  const h = fu.handoff;
+  // A parent with no handoff is worth saying out loud rather than rendering
+  // as an empty box: it means the worker closed without writing a summary,
+  // so a child linked to it inherits its BRANCH but not its findings.
+  const handoffHtml = h && (h.summary || "").trim()
+    ? `<div class="sw-fu-summary">${submitWorkEsc(h.summary)}</div>`
+    : `<div class="sw-fu-note">This card wrote no handoff summary. A child still
+         branches from its work, but inherits no findings — ask for
+         <code>--summary</code> in the card body next time.</div>`;
+  const items = fu.suggested || [];
+  const list = items.length
+    ? items.map(it => {
+        const filed = it.filed_as
+          ? `<span class="sw-fu-dup" title="A card for this item already exists — check it before filing another">already filed · ${submitWorkEsc(it.filed_as.id)}</span>`
+          : "";
+        const why = (it.why || []).slice(0,4)
+          .map(w => `<span class="sw-fu-why">${submitWorkEsc(w)}</span>`).join("");
+        return `<div class="sw-fu-item${it.filed_as ? " sw-fu-item-filed" : ""}" data-item="${submitWorkEsc(it.id)}">
+            <div class="sw-fu-item-title">${submitWorkEsc(it.title)}</div>
+            <div class="sw-fu-item-meta">${why}${filed}</div>
+          </div>`;
+      }).join("")
+    : `<div class="sw-fu-note">No open TODO item shares evidence with this
+         card. That is a real answer, not an empty list — file freeform from
+         the picker on the left.</div>`;
+  box.innerHTML = `<div class="sw-fu-head">PARENT FINDINGS</div>
+    ${handoffHtml}
+    <div class="sw-fu-head">RELATED TODO ITEMS <span class="sw-fu-sub">matched on shared files and terms</span></div>
+    ${list}`;
+}
+
+async function swLoadFollowUp(panel){
+  const state = panel && swState(panel);
+  const sel = panel.querySelector(".sw-parent");
+  if(!sel || !sel.value){ state.followUp = null; swRenderFollowUp(panel); return; }
+  const want = sel.value;
+  state.followUpLoading = true;
+  swRenderFollowUp(panel);
+  try{
+    const r = await fetch(`/api/kanban/${encodeURIComponent(want)}/follow-up`);
+    const j = await r.json();
+    // The dropdown can move while this is in flight; a late answer for a
+    // parent nobody is looking at any more must not overwrite the current one.
+    if(sel.value !== want) return;
+    state.followUp = j.ok
+      ? {parentId: want, handoff: j.handoff, suggested: j.suggested || []}
+      : {parentId: want, error: j.error || "could not read that card"};
+  }catch(err){
+    state.followUp = {parentId: want, error: err.message};
+  }finally{
+    state.followUpLoading = false;
+    swRenderFollowUp(panel);
   }
 }
 
@@ -456,6 +543,7 @@ function openSubmitWork(){
           <div class="sw-selected"></div>
           <div class="sw-bar">BUILDS ON (OPTIONAL)</div>
           <select class="sw-parent" title="File this as a child of an existing card: the board holds it until that card closes, and its worktree is branched from that card's branch instead of origin/master — so it starts with that work already in the tree."></select>
+          <div class="sw-followup"></div>
           <div class="sw-bar">ADDITIONAL INSTRUCTIONS (OPTIONAL)</div>
           <textarea class="sw-notes" placeholder="anything to add or override…"></textarea>
           <div class="sw-actions">
@@ -520,6 +608,21 @@ function openSubmitWork(){
       state.selected = state.selected === row.dataset.id ? null : row.dataset.id;
       submitWorkRenderList(panel);
       submitWorkRenderSelected(panel);
+    });
+
+    panel.querySelector(".sw-parent").addEventListener("change", () => swLoadFollowUp(panel));
+
+    // Clicking a suggestion selects that TODO item, leaving the parent set --
+    // which is the whole point: the coding card is filed as a child of the
+    // research, so its worker gets the findings without anyone pasting them.
+    panel.querySelector(".sw-followup").addEventListener("click", (e) => {
+      const row = e.target.closest(".sw-fu-item");
+      if(!row) return;
+      const state = swState(panel);
+      state.selected = row.dataset.item;
+      submitWorkRenderList(panel);
+      submitWorkRenderSelected(panel);
+      panel.querySelector(".sw-selected")?.scrollIntoView({block: "nearest"});
     });
 
     panel.querySelector(".sw-selected").addEventListener("click", (e) => {

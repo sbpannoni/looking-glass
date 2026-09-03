@@ -5211,6 +5211,173 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return (s[:max_len] or "task").strip("-")
 
 
+# ------------------------------------------- follow-up: card -> next card
+# A finished research card already carries a structured handoff (its run's
+# `summary` + free-form `metadata`), and a card filed as its child reads that
+# handoff automatically -- Hermes does that part, and hand-copying findings
+# into the next card's body would only make a second, staler copy.
+#
+# What nothing helped with was FILING that child: you had to notice the
+# research landed, remember which TODO item it feeds, and remember to set the
+# parent. Miss the parent and the coding card opens a worktree with no sign of
+# the research and re-derives it -- the exact failure the BUILDS ON control
+# already exists to prevent, reached from the wrong end.
+#
+# So: given a card, return its handoff plus the open TODO items ranked by
+# evidence overlap with it. The ranking is deliberately deterministic string
+# overlap, not an LLM call: every worker on this board is already queued
+# behind ONE vLLM seat, and a suggestion you can check ("matched
+# engineering_detection.py") beats a better one you cannot.
+_FOLLOWUP_FILE_RE = re.compile(
+    r"\b[\w./-]*?([\w-]+\.(?:py|tsx?|jsx?|sh|md|json|tsv|fna|ya?ml))\b")
+_FOLLOWUP_IDENT_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_]{5,})\b")
+# Words that co-occur in every card and every TODO line, so matching on them
+# would rank by verbosity rather than by subject.
+_FOLLOWUP_STOP = frozenset("""
+darkhelix should would could hermes kanban worker workers card cards task tasks
+already always because before better change changed changes detection module
+modules result results report reports review reviewed running status summary
+sequence sequences reference references analysis pipeline require required
+requires present missing verify verified verification implement implemented
+against design designed select selected agents agent cluster clusters
+clustering string strings behavior behaviour remove removed staging existing
+current currently instead within without through single multiple system
+""".split())
+_FOLLOWUP_MAX = 8
+
+
+def _followup_text(obj) -> str:
+    """Flatten a handoff (summary plus free-form metadata) into search text."""
+    if obj is None:
+        return ""
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, dict):
+        return " ".join([" ".join(map(str, obj.keys()))]
+                        + [_followup_text(v) for v in obj.values()])
+    if isinstance(obj, (list, tuple, set)):
+        return " ".join(_followup_text(v) for v in obj)
+    return str(obj)
+
+
+def _followup_signals(text: str) -> tuple[set[str], set[str]]:
+    """(filenames, identifiers) worth matching on, both lowercased.
+
+    Filenames are matched on the BASENAME: the card cites
+    /ssdpool/DARKHELIX/darkhelix/engineering_detection.py and TODO.md writes
+    `engineering_detection.py`, and a path comparison would miss every time.
+    """
+    files = {m.lower() for m in _FOLLOWUP_FILE_RE.findall(text or "")}
+    idents = {w.lower() for w in _FOLLOWUP_IDENT_RE.findall(text or "")}
+    idents -= _FOLLOWUP_STOP
+    idents -= {f.rsplit(".", 1)[0] for f in files}
+    return files, idents
+
+
+def _followup_rank(handoff_text: str, items: list[dict]) -> list[dict]:
+    """Open TODO items ranked by shared evidence with the handoff.
+
+    A filename in common is worth more than a word in common (weight 3): the
+    card said it read that file, so an item naming it is about the same code.
+    Items with no overlap are dropped rather than ranked last -- a suggestion
+    list that always has eight entries teaches you to ignore it.
+    """
+    h_files, h_idents = _followup_signals(handoff_text)
+    scored: list[dict] = []
+    for item in items:
+        i_files, i_idents = _followup_signals(
+            f"{item.get('title', '')} {item.get('text', '')}")
+        shared_files = sorted(h_files & i_files)
+        shared_idents = sorted(h_idents & i_idents)
+        score = 3 * len(shared_files) + len(shared_idents)
+        # The bar is a SHARED FILENAME, or enough shared vocabulary that the
+        # coincidence stops being plausible. A single word in common is not a
+        # relationship: the first cut of this ranked eight items, seven of
+        # them matched on words like "against" and "design", and a list that
+        # is always full is a list you learn to skip.
+        if not (shared_files or len(shared_idents) >= 4):
+            continue
+        scored.append({
+            "id": item.get("id"),
+            "title": item.get("title", "")[:180],
+            "section": item.get("section"),
+            "blocked": bool(item.get("blocked")),
+            "needs_ui": bool(item.get("needs_ui")),
+            "filed_as": item.get("filed_as"),
+            "score": score,
+            "why": shared_files[:4] + shared_idents[:4],
+        })
+    scored.sort(key=lambda r: (-r["score"], r["id"] or ""))
+    return scored[:_FOLLOWUP_MAX]
+
+
+@app.get("/api/kanban/{task_id}/follow-up")
+async def kanban_follow_up(task_id: str) -> JSONResponse:
+    """One card's handoff, plus the TODO items that handoff is evidence for.
+
+    Drives the SUBMIT WORK panel's follow-up affordance: review what the
+    research actually concluded, then file the next card as its child in one
+    step. `filed_as` rides along on every suggestion precisely so the panel
+    can say "already filed" -- surfacing a related item is only half the job
+    if it invites you to file the same work twice.
+    """
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    try:
+        detail = await _kanban_task_detail(task_id)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    task = detail.get("task") or {}
+
+    # Newest run that actually carries a handoff. A card can have a later run
+    # that crashed before writing one; that run's silence is not the answer.
+    handoff = None
+    for run in reversed(detail.get("runs") or []):
+        if run.get("summary") or run.get("metadata") or run.get("result"):
+            handoff = {
+                "summary": run.get("summary") or run.get("result") or "",
+                "metadata": run.get("metadata") or {},
+                "ended_at": run.get("ended_at"),
+                "outcome": run.get("outcome") or run.get("status"),
+            }
+            break
+
+    items: list[dict] = []
+    todo_error = None
+    try:
+        rc, out = await _fleet_ssh("snarf", f"cat {shlex.quote(DARKHELIX_TODO_PATH)}")
+        if rc == 0:
+            items = _parse_darkhelix_todo(out)
+        else:
+            todo_error = f"cat exited {rc}"
+    except Exception as exc:
+        todo_error = str(exc)
+
+    if items:
+        try:
+            filed, filed_titles = await _submitted_keys()
+        except Exception:
+            filed, filed_titles = {}, {}
+        for item in items:
+            item["filed_as"] = (
+                filed.get(_submission_key(item["title"], item["text"]))
+                or filed_titles.get(item["title"].strip()))
+
+    suggested = []
+    if handoff and items:
+        suggested = _followup_rank(
+            f"{handoff['summary']} {_followup_text(handoff['metadata'])}", items)
+
+    return JSONResponse({
+        "ok": True,
+        "parent": {"id": task.get("id"), "title": task.get("title"),
+                   "status": task.get("status"), "assignee": task.get("assignee")},
+        "handoff": handoff,
+        "suggested": suggested,
+        "todo_error": todo_error,
+    })
+
+
 @app.post("/api/kanban/create")
 async def kanban_create(request: Request) -> JSONResponse:
     """Single-click work submission: files a REAL kanban card, filed
