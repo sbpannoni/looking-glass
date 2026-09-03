@@ -117,8 +117,12 @@ Three claims it refuses to make:
 
 - **an unchecked URL.** Every entry is HEAD-checked from snarf, the host that
   will do the downloading, and a blocked item with no entry reads "needs a
-  URL" rather than a guess. The seed catalogue lost a plausible ConoServer
-  path to a 404 that way.
+  URL" rather than a guess — a plausible-looking ConoServer path was dropped
+  for answering 404 before the real one (`download/conoserver_protein.fa.gz`)
+  was found. Five of the nine items resolve today; the other four are not
+  downloads at all — a `diamond makedb` build, two tool installs, and one item
+  that says in its own text that it is blocked on curation, not compute. The
+  catalogue has no way to express those, which is the next thing to fix here.
 - **that a download is still needed.** On-disk size is compared against the
   server's `Content-Length` — which found the Mash RefSeq sketch already
   complete on snarf at 754,115,096 bytes, so that item is blocked on wire-in,

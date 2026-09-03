@@ -5191,8 +5191,12 @@ def _download_card_text(item: dict, entry: dict) -> tuple[str, str]:
         f"On snarf, as sam:\n\n"
         f"mkdir -p {dest if not entry.get('archive') else dest}\n"
         f"wget -c -P {dest} {url}{unpack}\n\n"
-        f"approx size: {entry.get('approx') or 'unknown'}\n\n"
-        "--- wire-in (this is the half that is not the download) ---\n"
+        f"approx size: {entry.get('approx') or 'unknown'}\n"
+        # A published checksum is the difference between "the file is there"
+        # and "the file is the file". Carried onto the card so the person who
+        # runs the download can settle it in one command.
+        + (f"verify:  md5sum -> {entry['md5']}\n" if entry.get("md5") else "")
+        + "\n--- wire-in (this is the half that is not the download) ---\n"
         f"{(entry.get('wire_in') or '').strip()}\n\n"
         "--- notes ---\n"
         f"{dest} is in the SHARED pool: every worktree symlinks database/ back "

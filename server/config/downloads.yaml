@@ -42,3 +42,51 @@ entries:
       DoMashPrefilter takes the .msh path directly. The lane has never been
       exercised, so expect the first run to be the real test of the wiring, not
       of the sketch.
+
+  # PathoFact 2.0's core database serves two blocked items -- the toxin profile
+  # set and the DB half of the pathofact entry -- so it appears twice, with
+  # different destinations and different wire-in work. Verified 2026-09-03:
+  # HTTP 200, 1,144,511,329 bytes. The md5 is Zenodo's own for the record.
+  - id: pathofact2-db
+    match: "PathoFact2 broad toxin profile set"
+    name: PathoFact 2.0 core database (toxin + VF HMM profiles)
+    url: https://zenodo.org/records/14192463/files/DATABASES.tar.gz?download=1
+    dest: /ssdpool/DARKHELIX/database/toxin_hmm/pathofact2
+    archive: tar.gz
+    md5: acb950e7994c561311a0a6ec36caa701
+    approx: 1.1 GB compressed
+    wire_in: >-
+      The archive carries PathoFact 2.0's HMM profiles for toxins and virulence
+      factors plus cddid_all.tbl and its ML models -- it is not a single .hmm
+      file. Extract, then build the broad profile set the pipeline expects at
+      database/toxin_hmm/pathofact_broad.hmm from the toxin profiles inside it.
+      Opt-in, server tier: do not turn it on for the edge build.
+
+  - id: pathofact-db
+    match: "pathofact` binary + DB"
+    name: PathoFact 2.0 database (the DB half of DoToxinPathofact)
+    url: https://zenodo.org/records/14192463/files/DATABASES.tar.gz?download=1
+    dest: /ssdpool/DARKHELIX/database/pathofact
+    archive: tar.gz
+    md5: acb950e7994c561311a0a6ec36caa701
+    approx: 1.1 GB compressed
+    wire_in: >-
+      This unblocks the DB half only. The `pathofact` binary is a Snakemake
+      pipeline install from gitlab.lcsb.uni.lu/ESB/PathoFact2, not a file to
+      fetch, so DoToxinPathofact stays blocked until that is installed too --
+      file it as ordinary work, not as a download.
+
+  # The TODO item says "~tens of MB"; the real file is 196 kB. Recorded as
+  # measured rather than as remembered.
+  - id: conoserver-protein
+    match: "ConoServer / ConoDictor DB"
+    name: ConoServer conopeptide protein sequences
+    url: https://www.conoserver.org/download/conoserver_protein.fa.gz
+    dest: /ssdpool/DARKHELIX/database/conoserver/conoserver_protein.fa.gz
+    approx: 196 kB gzipped (the TODO's "~tens of MB" is wrong)
+    wire_in: >-
+      This is the ConoServer SEQUENCE set. ConoDictor's own HMM/PSSM models are
+      not published as a separate download -- they come with the tool
+      (pip install conodictor) -- so check which of the two DoPeptideToxin
+      actually reads before wiring this in. Note the flag defaults True, so the
+      lane is on by default and currently pointing at nothing.
