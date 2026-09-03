@@ -169,6 +169,28 @@ def test_dedups_on_the_same_key_as_a_single_card_submission(monkeypatch):
     assert key in next(c for c in seen if "kanban swarm" in c)
 
 
+def test_every_card_is_told_where_durable_output_goes(monkeypatch):
+    """The rule lives in `execution-engine-dispatch`, which only `coder`
+    carries -- and the card that lost its synthesis.md to a deleted workspace
+    was a `researcher` synthesizer. create_swarm copies the goal onto every
+    card it makes, so the goal is the one place that reaches all of them."""
+    seen = _stub_ssh(monkeypatch)
+    _stub_detail(monkeypatch)
+    _post()
+    cmd = next(c for c in seen if "kanban swarm" in c)
+    assert "where your output has to live" in cmd
+    assert "/ssdpool/agent-work/" in cmd
+
+
+def test_the_output_rule_does_not_change_the_dedup_identity(monkeypatch):
+    """Boilerplate appended to the goal must not reach the key, or every
+    submission becomes unique and the dedup above is silently dead."""
+    seen = _stub_ssh(monkeypatch)
+    _stub_detail(monkeypatch)
+    r = _post()
+    assert r.json()["idempotency_key"] == srv._submission_key("An item", "The full item text")
+
+
 def test_reports_the_whole_graph_back(monkeypatch):
     _stub_ssh(monkeypatch)
     _stub_detail(monkeypatch)

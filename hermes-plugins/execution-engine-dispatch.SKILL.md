@@ -1,7 +1,7 @@
 ---
 name: execution-engine-dispatch
 description: "Run a kanban card through the LangGraph+Aider execution engine on snarf via the dispatch_to_engine tool, and diagnose the result."
-version: 2.0.0
+version: 2.1.0
 author: Hermes Agent (coder profile)
 license: MIT
 platforms: [linux]
@@ -91,6 +91,48 @@ the honest report.
 **Better still, run it.** A claim like "this loads 0 rows" is checkable in one
 command. A blocked card and a spawned fix task are expensive; a `python -c`
 against the real input is not.
+
+## Where the thing you produced has to live
+
+A card's workspace is scratch, and `scratch` means deleted: Hermes removes
+`~/.hermes/kanban/workspaces/<task_id>/` when the card completes. A document
+written there is destroyed by the same act that marks the card done.
+
+Not hypothetical. The 2026-09-02 swarm synthesizer (t_a2f91234) finished with
+`synthesis_artifact: /root/.hermes/kanban/workspaces/t_a2f91234/synthesis.md`
+in its completion metadata and signed off pointing at it. The directory was
+already gone when the first person went to read it. The work was good; the
+only copy was in a temp dir.
+
+So before you complete, put the deliverable somewhere that outlives the card.
+
+- **`/ssdpool/agent-work/<task_id>/output/` on snarf** — the durable root that
+  already holds this card's worktree and its engine attempts. Right for files:
+  reports, generated data, anything you would otherwise attach. You are on
+  CT111, which has no `/ssdpool` at all, so write it over ssh as `sam`:
+
+      ssh -i ~/.hermes/profiles/<profile>/snarf_key sam@192.168.1.239 \
+        "mkdir -p /ssdpool/agent-work/<task_id>/output"
+      scp -i ~/.hermes/profiles/<profile>/snarf_key report.md \
+        sam@192.168.1.239:/ssdpool/agent-work/<task_id>/output/
+
+  Only `coder` and `darkhelix` carry that key today. If your profile has none,
+  use the next option — do not skip the step.
+
+- **A comment on the card, or on the swarm root** — rows in `kanban.db`, so
+  they survive the workspace, the run and the session, and they are what the
+  board renders. Right for the findings themselves. In a swarm the root card
+  IS the shared blackboard: post there and every sibling can read it too.
+
+**Then name what you produced in the completion metadata**, e.g.
+`{"artifact": "/ssdpool/agent-work/<task_id>/output/report.md"}`. The HUD's
+FINDINGS pane on a done card reads those keys and checks every path it finds
+against disk, on the right host — so a path that is wrong, gone, or on CT111
+when the file is on snarf shows up as missing instead of sending a reader off
+to look for it.
+
+**Never name a path under the workspace.** By the time anyone reads the card,
+it is not there.
 
 ## Write down what you learned
 

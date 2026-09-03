@@ -5538,6 +5538,31 @@ async def kanban_create(request: Request) -> JSONResponse:
 _SWARM_ROLE_SKILL = {"verifier": "requesting-code-review",
                      "synthesizer": "humanizer"}
 _SWARM_MAX_WORKERS = 6
+# Appended to every swarm goal, which create_swarm then copies onto the root,
+# each worker, the verifier and the synthesizer -- so it reaches profiles that
+# have no dispatch skill to read it from.
+#
+# It has to be here because the rule lives in `execution-engine-dispatch`,
+# which only the `coder` profile carries, and the card that lost its work to
+# this was a `researcher` synthesizer. It wrote synthesis.md into its scratch
+# workspace; Hermes deletes that workspace on completion, so the file was gone
+# before anyone read the card. Only `coder` and `darkhelix` hold a snarf key,
+# so the instruction leads with the option every profile actually has.
+_SWARM_OUTPUT_RULE = """
+
+--- where your output has to live ---
+Your workspace is scratch and Hermes DELETES it when your card completes, so a
+file written there does not survive the card that wrote it. Put the deliverable
+somewhere durable before you finish:
+
+- a comment on your card, or on the swarm root (the shared blackboard every
+  card in this swarm can read). These are database rows: they survive the
+  workspace, the run and the session, and they are what the board shows.
+- a file under /ssdpool/agent-work/<your task id>/output/ on snarf, if you have
+  a snarf key. Right for anything too large to be a comment.
+
+Name any file you wrote in your completion metadata. Never name a path under
+your workspace -- by the time anyone reads the card, it is not there."""
 # One vLLM seat and kanban.max_in_progress: 1, so workers serialise no matter
 # how many there are (see docs/TASK-ISOLATION.md). Past about six angles this
 # is a decomposition, not a swarm.
@@ -5858,9 +5883,12 @@ async def kanban_swarm(request: Request) -> JSONResponse:
     # one item, one dedup key, whichever shape it was filed in.
     idempotency_key = _submission_key(title, body)
 
+    # The rule rides on the goal, not on the key: the dedup identity is the
+    # item as submitted, and appending boilerplate to it would make every
+    # submission unique and quietly defeat the dedup above.
     cmd = (
         "hermes kanban swarm "
-        f"{shlex.quote(goal)} "
+        f"{shlex.quote(goal + _SWARM_OUTPUT_RULE)} "
         + "".join(f"--worker {shlex.quote(f'{p}:{t}')} " for p, t in workers)
         + f"--verifier {shlex.quote(verifier)} "
         + f"--synthesizer {shlex.quote(synthesizer)} "

@@ -429,6 +429,18 @@ The root is created by hand (`sudo mkdir`, owned by `sam`, setgid) because
 falls back to its old flat `dispatch-attempts/` root for anything that is not
 a provisioned kanban task, so the toy and eval-harness paths are unchanged.
 
+**A document a card produces belongs under
+`/ssdpool/agent-work/<task_id>/output/`, never in the card's workspace.**
+`scratch` workspaces (`~/.hermes/kanban/workspaces/<task_id>/`) are deleted
+when the card completes, so a file written there is destroyed by the act that
+marks the card done — which is how the 2026-09-02 swarm's `synthesis.md` was
+gone before anyone read the card that named it. The rule is in
+`execution-engine-dispatch`, and because only `coder` carries that skill (and
+only `coder` and `darkhelix` hold a snarf key), every HUD-filed swarm also
+carries it in its goal, where `create_swarm` copies it onto all five cards.
+For findings rather than files, a comment on the card or the swarm root is
+better still: those are rows in `kanban.db`.
+
 Patches and attachments still live under `~/.hermes` on CT111 — `hermes kanban
 attach` needs a local file, so that one cannot move to snarf. The repo is 1.5 TB on disk but only ~6 MB of tracked
 source; `database/`, `thirdParty/`, `testData/` and `.venv-dev/` are symlinked
