@@ -72,6 +72,30 @@ const SW_SWARM_DEFAULT_VERIFIER = "darkhelix";
 const SW_SWARM_DEFAULT_SYNTH = "researcher";
 const SW_SWARM_MAX_WORKERS = 6;
 
+/* BUILDS ON: how the cards you can chain to are ordered and trimmed.
+   The group order is deliberately NOT KANBAN_LANE_ORDER. That is the board's
+   pipeline order, where `done` sits second from the end -- correct for a
+   board, wrong here, because this dropdown answers "whose finished work can
+   this card start from" and the answer is almost always a done card. Blocked
+   trails rather than being dropped: a card that stopped can still have a
+   branch worth branching from. An unrecognised status is appended, never
+   discarded (the same judgement kanbanColumnsFromTasks makes on the board). */
+const SW_PARENT_GROUP_ORDER = ["done", "review", "running", "ready",
+                               "todo", "triage", "scheduled", "blocked"];
+const SW_PARENT_DONE_KEY = "lg-sw-parent-done";
+/* Two different caps. KEEP bounds what the poll holds; MAX bounds what the
+   dropdown draws. They were one number, applied to the board before any
+   filtering, which is what made "finished only" worth adding carefully: a
+   single cap taken newest-first would hide old done cards behind 40 fresh
+   ones and the filter would look broken rather than full. */
+const SW_PARENT_KEEP = 200;
+const SW_PARENT_MAX = 40;
+/* Indent per level of the dependency graph, in non-breaking spaces -- a
+   <select> collapses ordinary leading whitespace. Capped so a five-deep chain
+   still leaves room for the title. */
+const SW_PARENT_INDENT = "\u00a0\u00a0";
+const SW_PARENT_MAX_INDENT = 4;
+
 function submitWorkEsc(s){
   return (s||"").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
 }
@@ -284,17 +308,87 @@ function submitWorkRenderSelected(panel){
    the two branches then conflict. Naming a parent here makes the board hold
    this card until that one closes AND cuts its branch from the parent's, so
    it starts where the parent finished. */
+/* Which cards the dropdown offers: everything non-archived, or only the
+   finished ones. A card that is currently SELECTED is always in the pool even
+   when the filter would exclude it -- turning the filter on must not silently
+   change what this card will be filed against. */
+function swParentPool(state, selected){
+  const all = state.parentCards || [];
+  const doneOnly = swPrefLoad(SW_PARENT_DONE_KEY, false);
+  // `done` and nothing else. `review` is finished work too, but it is
+  // finished-pending-a-verdict, and a filter called "finished only" that
+  // quietly includes cards still under review is a filter you cannot trust.
+  let cards = doneOnly ? all.filter(c => c.status === "done") : all;
+  cards = cards.slice(0, SW_PARENT_MAX);
+  if(selected && !cards.some(c => c.id === selected)){
+    const kept = all.find(c => c.id === selected);
+    // Tagged, not just appended: under the filter it lands in its own
+    // "still selected" heading, so a done-only list showing one `running`
+    // card reads as deliberate rather than as a broken filter.
+    if(kept) cards = cards.concat([{...kept, kept: true}]);
+  }
+  return cards;
+}
+
 function swRenderParentOptions(panel){
   const sel = panel.querySelector(".sw-parent");
   if(!sel) return;
   const state = swState(panel);
-  const cards = state.parentCards || [];
   const keep = sel.value;
-  // Only cards that can still produce a branch to build on. A done card's
-  // branch is exactly what a follow-up wants; an archived one is not.
-  const opts = cards.map(c =>
-    `<option value="${submitWorkEsc(c.id)}">${submitWorkEsc(c.status)} · ${submitWorkEsc((c.title||"").slice(0,64))}</option>`).join("");
-  const want = cards.map(c => c.id).join("|");
+  const cards = swParentPool(state, keep);
+  const doneOnly = swPrefLoad(SW_PARENT_DONE_KEY, false);
+
+  const btn = panel.querySelector(".sw-parent-filter");
+  if(btn){
+    const doneCount = (state.parentCards || []).filter(c => c.status === "done").length;
+    btn.textContent = `finished only (${doneCount})`;
+    btn.classList.toggle("on", doneOnly);
+  }
+
+  // Grouped by status, so the finished cards are one heading rather than a
+  // prefix repeated down 38 rows. The status moves into the optgroup label,
+  // which is why the option itself is now just the title.
+  const lin = state.lineage || {};
+  const by = new Map();
+  cards.forEach(c => {
+    const k = (c.kept && doneOnly) ? `still selected · ${c.status || "?"}`
+                                   : (c.status || "todo");
+    if(!by.has(k)) by.set(k, []);
+    by.get(k).push(c);
+  });
+  // Inside a group, siblings from one tree sit together, shallowest first, so
+  // the indentation reads as a chain rather than as noise. Cards the lineage
+  // call has not seen (or could not reach) sort last at depth 0 -- flat, which
+  // is exactly what the list looked like before.
+  const at = id => lin[id] || {};
+  by.forEach(rows => rows.sort((a, b) =>
+    (at(a.id).tree ?? 1e6) - (at(b.id).tree ?? 1e6)
+    || (at(a.id).depth ?? 0) - (at(b.id).depth ?? 0)));
+  const groups = SW_PARENT_GROUP_ORDER.filter(n => by.has(n))
+    .concat([...by.keys()].filter(n => !SW_PARENT_GROUP_ORDER.includes(n)).sort());
+  const opts = groups.map(name => {
+    const rows = by.get(name).map(c => {
+      const l = at(c.id);
+      const depth = Math.min(l.depth || 0, SW_PARENT_MAX_INDENT);
+      const pad = SW_PARENT_INDENT.repeat(depth) + (depth ? "↳ " : "");
+      // The one card whose ancestors ARE the rest of its tree: building on it
+      // inherits every card in the run, which is the answer to "which of these
+      // do I chain to" often enough to be worth marking in place.
+      const star = l.captures_all ? "★ " : "";
+      const why = l.captures_all
+        ? ` title="Inherits the whole tree — its ${l.tree_size - 1} ancestors are every other card in it"`
+        : "";
+      return `<option value="${submitWorkEsc(c.id)}"${why}
+        >${pad}${star}${submitWorkEsc((c.title||"").slice(0,64))}</option>`;
+    }).join("");
+    return `<optgroup label="${submitWorkEsc(name)} (${by.get(name).length})">${rows}</optgroup>`;
+  }).join("");
+
+  // The signature carries the filter as well as the ids: without it, turning
+  // the filter on while the visible cards happen to be unchanged would leave
+  // the old options in place and the button lying about what is listed.
+  const want = (doneOnly ? "done|" : "all|")
+    + cards.map(c => `${c.id}:${at(c.id).depth ?? ""}:${at(c.id).captures_all ? 1 : 0}`).join("|");
   if(sel.dataset.opts !== want){
     sel.dataset.opts = want;
     sel.innerHTML = `<option value="">nothing — branch from origin/master</option>` + opts;
@@ -388,6 +482,26 @@ async function swLoadFollowUp(panel){
   }
 }
 
+/* The board is not a list, it is a set of small dependency trees, and which
+   card to build on is a question about the tree: the swarm's synthesizer sits
+   downstream of its verifier, which sits downstream of all three workers, so
+   chaining to it inherits the whole run. /api/kanban/lineage says where each
+   card sits (`depth`) and which one's ancestry covers its entire tree
+   (`captures_all`). Fetched on open and on reload rather than on the 20s poll:
+   it costs a detail call per card server-side, and a graph does not move
+   between two polls. */
+async function swLoadLineage(panel){
+  const state = swState(panel);
+  try{
+    const r = await fetch("/api/kanban/lineage");
+    const j = await r.json();
+    const map = {};
+    (j.cards || []).forEach(c => { map[c.id] = c; });
+    state.lineage = map;
+  }catch{ state.lineage = state.lineage || {}; }
+  swRenderParentOptions(panel);
+}
+
 async function swLoadParentCards(panel){
   const state = swState(panel);
   try{
@@ -395,7 +509,7 @@ async function swLoadParentCards(panel){
     const j = await r.json();
     state.parentCards = (j.tasks || [])
       .filter(t => t.status && t.status !== "archived")
-      .slice(0, 40)
+      .slice(0, SW_PARENT_KEEP)
       .map(t => ({id: t.id, title: t.title, status: t.status}));
   }catch{ state.parentCards = state.parentCards || []; }
   swRenderParentOptions(panel);
@@ -608,6 +722,7 @@ async function submitWorkSwarm(panel){
       state.selected = null;
       submitWorkLoad(panel);
       swLoadParentCards(panel);
+      swLoadLineage(panel);
       // The root is `done` the moment it exists and has no log of its own --
       // it is the blackboard, not a run. The first worker is where something
       // is actually happening.
@@ -754,6 +869,7 @@ async function submitWorkSubmit(panel){
       // badge immediately, rather than looking untouched until a reload.
       submitWorkLoad(panel);
       swLoadParentCards(panel);
+      swLoadLineage(panel);
       if(taskId !== "?" && typeof openTaskLog === "function") openTaskLog(taskId);
     }else{
       status.innerHTML = `<span class="err">${submitWorkEsc(j.error || "unknown error")}</span>`;
@@ -798,7 +914,10 @@ function openSubmitWork(){
             </span>
           </div>
           <div class="sw-single">
-            <div class="sw-bar">BUILDS ON (OPTIONAL)</div>
+            <div class="sw-bar">BUILDS ON (OPTIONAL)
+              <button class="sw-parent-filter" type="button"
+                title="List only cards in done — the ones that have finished, so their branch and their handoff both exist. A card you have already selected stays listed either way.">finished only</button>
+            </div>
             <select class="sw-parent" title="File this as a child of an existing card: the board holds it until that card closes, and its worktree is branched from that card's branch instead of origin/master — so it starts with that work already in the tree."></select>
             <div class="sw-followup"></div>
           </div>
@@ -820,6 +939,7 @@ function openSubmitWork(){
     };
     panel.querySelector(".sw-reload").onclick = () => {
       submitWorkLoad(panel); swLoadParentCards(panel); swLoadProfiles(panel);
+      swLoadLineage(panel);
     };
     panel.querySelector(".sw-blocked-toggle").onclick = () => {
       swPrefSave(SW_SHOW_BLOCKED_KEY, !swPrefLoad(SW_SHOW_BLOCKED_KEY, false));
@@ -905,6 +1025,10 @@ function openSubmitWork(){
     });
 
     panel.querySelector(".sw-parent").addEventListener("change", () => swLoadFollowUp(panel));
+    panel.querySelector(".sw-parent-filter").onclick = () => {
+      swPrefSave(SW_PARENT_DONE_KEY, !swPrefLoad(SW_PARENT_DONE_KEY, false));
+      swRenderParentOptions(panel);
+    };
 
     // Clicking a suggestion selects that TODO item, leaving the parent set --
     // which is the whole point: the coding card is filed as a child of the
@@ -933,6 +1057,7 @@ function openSubmitWork(){
     // Once per open, not on the poll: profile directories on CT111 do not
     // move while you are looking at this form, and the server caches them.
     swLoadProfiles(panel);
+    swLoadLineage(panel);
     // The picker is a live view of two things that both move underneath it:
     // TODO.md on snarf and the board on hermes. Left as a one-shot read it
     // showed the state at the moment the tab was opened, forever.

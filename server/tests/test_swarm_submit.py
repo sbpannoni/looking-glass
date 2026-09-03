@@ -193,3 +193,69 @@ def test_a_failing_cli_is_reported_not_swallowed(monkeypatch):
     _stub_ssh(monkeypatch, swarm_out="kanban swarm: at least one --worker", rc=2)
     r = _post()
     assert r.status_code == 502 and "--worker" in r.json()["error"]
+
+
+# --- BUILDS ON lineage -----------------------------------------------------
+# `captures_all` is a claim about the graph -- "build on this one and you
+# inherit the whole run" -- and the dropdown puts a star on it. A star on the
+# wrong card sends follow-up work off a branch missing half the run, so the
+# tests are mostly about when it must NOT be set.
+
+def _annotate(edges, ids):
+    """edges: {child: [parents]}"""
+    cards = [{"id": i, "created_at": n} for n, i in enumerate(ids)]
+    parents = {i: set(edges.get(i, ())) for i in ids}
+    children = {i: set() for i in ids}
+    for child, ps in edges.items():
+        for pid in ps:
+            # Mirrors the endpoint: a link to a card outside the window is
+            # recorded on the child and nowhere else.
+            if pid in children:
+                children[pid].add(child)
+    srv._lineage_annotate(cards, parents, children)
+    return {c["id"]: c for c in cards}
+
+
+def test_the_swarm_synthesizer_is_the_card_that_captures_everything():
+    """The real shape: root -> 3 workers -> verifier -> synthesizer."""
+    rows = _annotate(
+        {"w1": ["root"], "w2": ["root"], "w3": ["root"],
+         "ver": ["w1", "w2", "w3"], "syn": ["ver"]},
+        ["root", "w1", "w2", "w3", "ver", "syn"])
+    assert rows["syn"]["captures_all"] is True
+    assert [rows[i]["captures_all"] for i in ("root", "w1", "ver")] == [False, False, False]
+    assert rows["root"]["depth"] == 0 and rows["w1"]["depth"] == 1
+    assert rows["ver"]["depth"] == 2 and rows["syn"]["depth"] == 3
+    assert {rows[i]["tree"] for i in rows} == {0}
+
+
+def test_nothing_is_starred_when_no_single_card_covers_the_tree():
+    """Two independent leaves off one root: neither inherits the other."""
+    rows = _annotate({"a": ["root"], "b": ["root"]}, ["root", "a", "b"])
+    assert not any(r["captures_all"] for r in rows.values())
+
+
+def test_a_lone_card_captures_nothing():
+    rows = _annotate({}, ["solo"])
+    assert rows["solo"]["captures_all"] is False and rows["solo"]["tree_size"] == 1
+
+
+def test_separate_trees_get_separate_ids_and_their_own_star():
+    rows = _annotate({"a2": ["a1"], "b2": ["b1"]}, ["a1", "a2", "b1", "b2"])
+    assert rows["a1"]["tree"] != rows["b1"]["tree"]
+    assert rows["a2"]["captures_all"] and rows["b2"]["captures_all"]
+    assert rows["a2"]["tree_size"] == 2
+
+
+def test_a_cycle_terminates_instead_of_recursing_forever():
+    """The board should not contain one; a claim about the graph must not
+    depend on that."""
+    rows = _annotate({"a": ["b"], "b": ["a"], "c": ["a"]}, ["a", "b", "c"])
+    assert all("depth" in r for r in rows.values())
+
+
+def test_links_to_cards_outside_the_window_are_ignored():
+    """Only the newest _LINEAGE_MAX_CARDS are fetched, so a parent may be off
+    the end of the list -- it must not become a phantom ancestor."""
+    rows = _annotate({"a": ["off_the_list"]}, ["a", "b"])
+    assert rows["a"]["depth"] == 0 and rows["a"]["captures_all"] is False

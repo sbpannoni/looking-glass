@@ -1061,6 +1061,25 @@ button.tm-review-btn:disabled{opacity:.5; cursor:default; box-shadow:none}
   color:var(--txt); font-family:'Rajdhani'; font-size:12.5px; outline:none;
 }
 .sw-parent:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+/* Status headings inside the dropdown. A native <select> takes very little
+   styling, which is why the indentation and the ★ are TEXT in the option
+   label rather than CSS -- they have to survive the platform's own rendering
+   of the popup. */
+.sw-parent optgroup{
+  font-family:'Orbitron'; font-size:9px; letter-spacing:1.4px;
+  color:var(--cyan-dim); background:var(--bg);
+}
+.sw-parent option{
+  font-family:'Rajdhani'; font-size:12.5px; letter-spacing:0; color:var(--txt);
+}
+.sw-parent-filter{
+  margin-left:auto; background:none; border:1px solid var(--line); border-radius:6px;
+  color:var(--txt-dim); font-family:'Rajdhani'; font-size:11px; letter-spacing:0;
+  padding:2px 8px; cursor:pointer;
+}
+.sw-parent-filter:hover{border-color:var(--cyan); color:var(--cyan)}
+.sw-parent-filter.on{border-color:var(--teal); color:var(--teal);
+  background:color-mix(in srgb, var(--teal) 12%, transparent)}
 
 /* ---- file as: single card, or a swarm ----------------------------------
    Two shapes of submission share this column. The single-card controls are

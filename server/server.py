@@ -5582,6 +5582,169 @@ async def _hermes_profiles(force: bool = False) -> list[dict]:
     return rows
 
 
+# ------------------------------------------------------- BUILDS ON lineage
+# The BUILDS ON dropdown listed every open card as a flat, newest-first list.
+# That is the wrong shape for the question it answers -- "whose finished work
+# can this card start from" -- because the board is not a list, it is a set of
+# small dependency trees, and the useful card is nearly always the one at the
+# BOTTOM of a tree: the swarm's synthesizer sits downstream of its verifier,
+# which sits downstream of all three workers, so chaining to it inherits the
+# whole run. Nothing on the flat list said which card that was.
+#
+# So this returns the same cards annotated with their position in the graph:
+# `tree` (which component), `depth` (longest parent chain above it), and
+# `captures_all` -- true when this card's transitive ancestors ARE every other
+# card in its component, i.e. building on it inherits the lot.
+#
+# `captures_all` is a claim about the graph and is made only when the graph
+# supports it: a component of one card is not "capturing" anything, and if no
+# single card's ancestry covers the component (two independent leaves, say)
+# then NOTHING is marked. A star on the wrong card would send follow-up work
+# off a branch that is missing half the run.
+#
+# Links are not on the board payload -- only `link_counts` -- so this fans out
+# one detail call per card, bounded and concurrency-limited the same way
+# _rollup_effective_status already does it, and cached, because the dropdown
+# is polled and a graph does not move between two polls.
+_LINEAGE_MAX_CARDS = 80
+_LINEAGE_CONCURRENCY = 6
+_LINEAGE_TTL = 60.0
+_LINEAGE_CACHE: dict = {"at": 0.0, "payload": None}
+
+
+def _lineage_annotate(cards: list[dict], parents: dict[str, set],
+                      children: dict[str, set]) -> None:
+    """Annotate cards in place with tree, depth and captures_all."""
+    ids = [c["id"] for c in cards]
+    index = {cid: i for i, cid in enumerate(ids)}
+
+    # Undirected components: a tree is a tree whichever way you walk it.
+    comp: dict[str, int] = {}
+    for cid in ids:
+        if cid in comp:
+            continue
+        n = len(set(comp.values()))
+        stack, seen = [cid], set()
+        while stack:
+            cur = stack.pop()
+            if cur in seen or cur not in index:
+                continue
+            seen.add(cur)
+            comp[cur] = n
+            stack.extend(parents.get(cur, ()))
+            stack.extend(children.get(cur, ()))
+
+    # Longest parent chain above each card. Iterative with a visiting set so a
+    # cycle (the board should not have one, but a claim about the graph must
+    # not depend on that) degrades to a finite depth instead of recursing
+    # until the stack goes.
+    depth: dict[str, int] = {}
+
+    def depth_of(start: str) -> int:
+        stack, visiting = [start], set()
+        while stack:
+            cur = stack[-1]
+            if cur in depth:
+                stack.pop()
+                continue
+            ups = [p for p in parents.get(cur, ()) if p in index and p not in visiting]
+            pending = [p for p in ups if p not in depth]
+            if pending:
+                visiting.add(cur)
+                stack.extend(pending)
+                continue
+            depth[cur] = (1 + max((depth[p] for p in ups), default=-1)) if ups else 0
+            visiting.discard(cur)
+            stack.pop()
+        return depth[start]
+
+    # Transitive ancestors, memoised over the same guarded walk.
+    ancestors: dict[str, set] = {}
+
+    def ancestors_of(cid: str) -> set:
+        if cid in ancestors:
+            return ancestors[cid]
+        acc: set = set()
+        stack, seen = list(parents.get(cid, ())), {cid}
+        while stack:
+            cur = stack.pop()
+            if cur in seen or cur not in index:
+                continue
+            seen.add(cur)
+            acc.add(cur)
+            stack.extend(parents.get(cur, ()))
+        ancestors[cid] = acc
+        return acc
+
+    sizes: dict[int, int] = {}
+    for cid in ids:
+        sizes[comp[cid]] = sizes.get(comp[cid], 0) + 1
+
+    for card in cards:
+        cid = card["id"]
+        card["tree"] = comp[cid]
+        card["tree_size"] = sizes[comp[cid]]
+        card["depth"] = depth_of(cid)
+        # The whole component minus itself, and only worth saying at all when
+        # there is more than one card in it.
+        card["captures_all"] = (sizes[comp[cid]] > 1
+                                and len(ancestors_of(cid)) == sizes[comp[cid]] - 1)
+
+
+@app.get("/api/kanban/lineage")
+async def kanban_lineage() -> JSONResponse:
+    """Every open card with its place in the dependency graph.
+
+    Drives BUILDS ON: indentation from `depth`, and a marker on the card whose
+    ancestry covers its whole tree -- the one that inherits everything."""
+    now = time.time()
+    cached = _LINEAGE_CACHE.get("payload")
+    if cached and (now - _LINEAGE_CACHE["at"] < _LINEAGE_TTL):
+        return JSONResponse(cached)
+    try:
+        board = await _kanban_api_get("/api/plugins/kanban/board")
+    except Exception as exc:
+        return JSONResponse({"cards": [], "error": str(exc)}, status_code=502)
+
+    cards: list[dict] = []
+    for column in board.get("columns") or []:
+        for task in column.get("tasks") or []:
+            if not task.get("id") or task.get("status") == "archived":
+                continue
+            cards.append({"id": task["id"], "title": task.get("title") or "",
+                          "status": task.get("status"),
+                          "created_at": task.get("created_at") or 0})
+    cards.sort(key=lambda c: c["created_at"], reverse=True)
+    cards = cards[:_LINEAGE_MAX_CARDS]
+    known = {c["id"] for c in cards}
+
+    parents: dict[str, set] = {c["id"]: set() for c in cards}
+    children: dict[str, set] = {c["id"]: set() for c in cards}
+    sem = asyncio.Semaphore(_LINEAGE_CONCURRENCY)
+
+    async def one(card: dict) -> None:
+        async with sem:
+            try:
+                detail = await _kanban_task_detail(card["id"])
+            except Exception:
+                return
+        links = detail.get("links") or {}
+        for pid in links.get("parents") or []:
+            if pid in known:
+                parents[card["id"]].add(pid)
+                children[pid].add(card["id"])
+        for kid in links.get("children") or []:
+            if kid in known:
+                children[card["id"]].add(kid)
+                parents[kid].add(card["id"])
+
+    await asyncio.gather(*(one(c) for c in cards))
+    _lineage_annotate(cards, parents, children)
+    payload = {"cards": cards, "trees": len({c["tree"] for c in cards})}
+    _LINEAGE_CACHE.update({"at": now, "payload": payload})
+    return JSONResponse(payload)
+
+
 @app.get("/api/kanban/profiles")
 async def kanban_profiles() -> JSONResponse:
     """Which profiles exist, and which can hold each swarm role.
