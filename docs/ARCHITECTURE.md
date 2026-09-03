@@ -88,6 +88,13 @@ regardless of who created it (SUBMIT WORK, the auto-decomposer, the CLI, the
 dashboard), not just the ones this HUD filed. `POST /api/kanban/create` calls
 the same function, so there is one implementation.
 
+SUBMIT WORK can file work in either of the two shapes the board holds: one
+card to `triage` (`POST /api/kanban/create`, Hermes's auto-decomposer builds
+the chain) or a swarm (`POST /api/kanban/swarm` — parallel workers on one
+goal, then a verifier, then a synthesizer). Both file under the same
+`created_by` and the same content-hash dedup key, so an item cannot be opened
+twice in two different shapes.
+
 See [TASK-ISOLATION.md](TASK-ISOLATION.md) for the full mechanism: the scope
 rules, how a card inherits its parents' branches, the dispatch-target
 contract, and what happens when provisioning fails.

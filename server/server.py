@@ -5485,6 +5485,261 @@ async def kanban_create(request: Request) -> JSONResponse:
                          "isolation_detail": prov.get("detail") or prov.get("error") or ""})
 
 
+# ------------------------------------------------------- SWARM (fan out)
+# The second shape of work the board can hold, and until now the only one
+# that was not reachable from here: `hermes kanban swarm` builds a fixed
+# graph -- a done-on-arrival root that is the shared blackboard, N parallel
+# worker cards, a verifier that waits on all of them, and a synthesizer that
+# waits on the verifier. It was proven out by hand over ssh on 2026-09-02
+# (root t_c4c82bf1, three workers, verifier, synthesizer) and it worked; the
+# HUD simply had no button for it, so recreating that run meant composing a
+# multi-line CLI invocation by hand.
+#
+# Three things this path does that the raw CLI does not, each of them a
+# failure we have actually had:
+#
+#   1. --created-by looking-glass. `created_by` propagates to EVERY card the
+#      swarm creates (kanban_swarm._create_swarm_uncommitted passes it to the
+#      root, the workers, the verifier and the synthesizer), and it is the
+#      first thing _darkhelix_lineage checks -- so the whole graph is in
+#      scope for claim-time provisioning and every card gets its own worktree
+#      on snarf. The hand-run swarm used `--created-by "claude (CT112)"`,
+#      which is in scope for nothing; it got away with it only because those
+#      cards were read-only investigations.
+#
+#   2. Role skills are checked BEFORE filing. `create_swarm` hardcodes
+#      skills=["humanizer"] on the synthesizer and skills=["requesting-code-
+#      review"] on the verifier, without checking the profile it was handed
+#      actually has them. On 2026-09-02 `--synthesizer researcher` died at
+#      agent init with "Unknown skill(s): humanizer" AFTER all three workers
+#      and the verifier had finished -- the entire point of the swarm, lost
+#      at the last card. `coder` is missing humanizer and `researcher` is
+#      missing requesting-code-review today, so this is one dropdown away
+#      from happening again in the other direction.
+#
+#   3. Worker titles are rejected if they contain a colon.
+#      kanban_swarm.parse_worker_arg splits `--worker` on ":" with maxsplit=2
+#      and treats the third field as a comma-separated SKILL LIST, so a
+#      perfectly reasonable title ("Audit X: the four layers") files a card
+#      whose skills are ["the four layers"] and dies the same way.
+#
+# The dedup key is deliberately the SAME _submission_key as /api/kanban/create
+# -- title + body -- so filing an item as a swarm marks it filed in the picker,
+# and a later single-card submission of the same item returns the swarm's root
+# instead of quietly opening a second front on the same work.
+#
+# What is NOT here, on purpose: --parent. The swarm CLI has no way to hang its
+# root off an existing card, so BUILDS ON does not apply and the panel hides
+# it rather than offering a control that would be silently ignored.
+
+# Skills `create_swarm` puts on each role card without checking the profile
+# has them. Read from the live profiles rather than assumed: profiles are
+# per-profile directories on CT111 and Sam adds skills to them by hand.
+_SWARM_ROLE_SKILL = {"verifier": "requesting-code-review",
+                     "synthesizer": "humanizer"}
+_SWARM_MAX_WORKERS = 6
+# One vLLM seat and kanban.max_in_progress: 1, so workers serialise no matter
+# how many there are (see docs/TASK-ISOLATION.md). Past about six angles this
+# is a decomposition, not a swarm.
+
+_PROFILE_PROBE = (
+    'for d in "$HOME"/.hermes/profiles/*/; do n=$(basename "$d"); s=""; '
+    'for k in humanizer requesting-code-review; do '
+    'if find "$d/skills" -maxdepth 4 -name "$k" -type d 2>/dev/null '
+    '| grep -q .; then s="$s $k"; fi; done; echo "$n:$s"; done'
+)
+_PROFILES_TTL = 300.0
+_PROFILES_CACHE: dict = {"at": 0.0, "rows": []}
+
+
+async def _hermes_profiles(force: bool = False) -> list[dict]:
+    """Live profiles on CT111, each with the role skills it actually carries.
+
+    Cached for _PROFILES_TTL: the panel polls, profile directories do not
+    move, and this is an ssh round trip. An empty list is never cached -- a
+    failed probe must not read as "there are no profiles" for five minutes."""
+    now = time.time()
+    if not force and _PROFILES_CACHE["rows"] and (
+            now - _PROFILES_CACHE["at"] < _PROFILES_TTL):
+        return _PROFILES_CACHE["rows"]
+    rc, out = await _kanban_ssh(_PROFILE_PROBE)
+    if rc != 0:
+        raise RuntimeError(f"profile probe exited {rc}: {out[-300:]}")
+    rows: list[dict] = []
+    for line in out.splitlines():
+        name, _, skills = line.partition(":")
+        name = name.strip()
+        if not name or name == "*":       # unexpanded glob: no profiles dir
+            continue
+        have = set(skills.split())
+        rows.append({"name": name,
+                     "skills": sorted(have),
+                     "can_verify": _SWARM_ROLE_SKILL["verifier"] in have,
+                     "can_synthesize": _SWARM_ROLE_SKILL["synthesizer"] in have})
+    if not rows:
+        raise RuntimeError("profile probe returned nothing")
+    _PROFILES_CACHE.update({"at": now, "rows": rows})
+    return rows
+
+
+@app.get("/api/kanban/profiles")
+async def kanban_profiles() -> JSONResponse:
+    """Which profiles exist, and which can hold each swarm role.
+
+    Drives the swarm form's dropdowns: a profile that cannot verify is not
+    offered as a verifier, rather than offered and then failing at agent init
+    an hour into the run."""
+    try:
+        rows = await _hermes_profiles()
+    except Exception as exc:
+        return JSONResponse({"profiles": [], "error": str(exc)}, status_code=502)
+    return JSONResponse({"profiles": rows,
+                         "role_skills": _SWARM_ROLE_SKILL,
+                         "max_workers": _SWARM_MAX_WORKERS})
+
+
+def _swarm_worker_error(index: int, profile: str, title: str,
+                        known: set[str]) -> str | None:
+    """Why this worker spec cannot be filed, or None."""
+    if profile not in known:
+        return f"worker {index}: no such profile {profile!r}"
+    if not title:
+        return f"worker {index}: needs a one-line angle"
+    if ":" in title:
+        # Not cosmetic: parse_worker_arg would read everything after the
+        # colon as a skill list and the card would die at init.
+        return (f"worker {index}: no colons in the angle -- the CLI reads "
+                "everything after one as a skill list")
+    if "\n" in title:
+        return f"worker {index}: the angle is one line"
+    if len(title) > 200:
+        return f"worker {index}: angle is {len(title)} chars, max 200"
+    return None
+
+
+@app.post("/api/kanban/swarm")
+async def kanban_swarm(request: Request) -> JSONResponse:
+    """Fan one TODO item out into a swarm graph, in one click.
+
+    Body: {"title": ..., "body": ..., "workers": [{"profile", "title"}, ...],
+           "verifier": <profile>, "synthesizer": <profile>}
+
+    `body` is the goal: it becomes the root card's body AND is appended to
+    every worker, verifier and synthesizer card as shared context, so it is
+    the one place the actual instructions belong. A worker's own `title` is
+    also its body (parse_worker_arg sets body=title), so it is an angle on
+    the goal, not a task description in its own right.
+
+    Unlike /api/kanban/create this does NOT file to triage: swarm workers are
+    created `ready` and the dispatcher takes them on its next tick. That is
+    the whole point of the shape -- you name the workers yourself instead of
+    letting the specifier decompose -- but it means this button dispatches,
+    where the other one queues. The panel says so above the button."""
+    payload = await request.json()
+    title = (payload.get("title") or "").strip()
+    body = (payload.get("body") or "").strip()
+    goal = body or title
+    if not goal:
+        return JSONResponse({"ok": False, "error": "a goal is required"},
+                            status_code=400)
+
+    raw_workers = payload.get("workers") or []
+    if not isinstance(raw_workers, list) or not raw_workers:
+        return JSONResponse({"ok": False, "error": "at least one worker is required"},
+                            status_code=400)
+    if len(raw_workers) > _SWARM_MAX_WORKERS:
+        return JSONResponse(
+            {"ok": False, "error": f"at most {_SWARM_MAX_WORKERS} workers"},
+            status_code=400)
+
+    # Fail closed. Every role check below depends on this list, and filing a
+    # swarm we could not validate risks the exact failure this endpoint
+    # exists to prevent: an hour of worker runs thrown away by a synthesizer
+    # that cannot start.
+    try:
+        profiles = await _hermes_profiles()
+    except Exception as exc:
+        return JSONResponse(
+            {"ok": False, "error": f"could not read the profiles on hermes ({exc}) "
+                                   "-- refusing to file a swarm whose roles cannot "
+                                   "be checked"}, status_code=502)
+    known = {p["name"] for p in profiles}
+
+    workers: list[tuple[str, str]] = []
+    for i, w in enumerate(raw_workers, start=1):
+        profile = str((w or {}).get("profile") or "").strip()
+        wtitle = str((w or {}).get("title") or "").strip()
+        err = _swarm_worker_error(i, profile, wtitle, known)
+        if err:
+            return JSONResponse({"ok": False, "error": err}, status_code=400)
+        workers.append((profile, wtitle))
+
+    for role, key in (("verifier", "can_verify"), ("synthesizer", "can_synthesize")):
+        name = str(payload.get(role) or "").strip()
+        if name not in known:
+            return JSONResponse({"ok": False, "error": f"{role}: no such profile {name!r}"},
+                                status_code=400)
+        row = next(p for p in profiles if p["name"] == name)
+        if not row[key]:
+            skill = _SWARM_ROLE_SKILL[role]
+            return JSONResponse(
+                {"ok": False,
+                 "error": f"{role} {name!r} has no {skill!r} skill, which the swarm "
+                          f"puts on every {role} card -- that card would die at agent "
+                          "init after the workers had already run"},
+                status_code=400)
+
+    verifier = str(payload["verifier"]).strip()
+    synthesizer = str(payload["synthesizer"]).strip()
+    # Same identity as a single-card submission of the same item, on purpose:
+    # one item, one dedup key, whichever shape it was filed in.
+    idempotency_key = _submission_key(title, body)
+
+    cmd = (
+        "hermes kanban swarm "
+        f"{shlex.quote(goal)} "
+        + "".join(f"--worker {shlex.quote(f'{p}:{t}')} " for p, t in workers)
+        + f"--verifier {shlex.quote(verifier)} "
+        + f"--synthesizer {shlex.quote(synthesizer)} "
+        + f"--idempotency-key {shlex.quote(idempotency_key)} "
+        + f"--created-by {_HUD_CREATOR} --json"
+    )
+    try:
+        rc, out = await _kanban_ssh(cmd)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    if rc != 0:
+        return JSONResponse({"ok": False, "error": out[-2000:]}, status_code=502)
+    try:
+        data = json.loads(out.strip())
+    except json.JSONDecodeError:
+        return JSONResponse({"ok": False, "error": f"unparseable output: {out[-500:]}"},
+                            status_code=502)
+
+    root_id = str(data.get("root_id") or "")
+    # A dedup hit returns the EXISTING graph -- create_swarm recovers the
+    # topology from the root's blackboard rather than building a second one --
+    # and says nothing about which happened. Same tell as /api/kanban/create:
+    # a root this request created is seconds old.
+    duplicate = False
+    if _TASK_ID_RE.match(root_id):
+        try:
+            detail = await _kanban_task_detail(root_id)
+            created_at = (detail.get("task") or {}).get("created_at")
+            duplicate = (time.time() - float(created_at)) > 10
+        except Exception:
+            duplicate = False
+
+    return JSONResponse({
+        "ok": True, "duplicate": duplicate, "idempotency_key": idempotency_key,
+        "root": root_id,
+        "workers": [{"id": tid, "profile": p, "title": t}
+                    for tid, (p, t) in zip(data.get("worker_ids") or [], workers)],
+        "verifier": {"id": data.get("verifier_id"), "profile": verifier},
+        "synthesizer": {"id": data.get("synthesizer_id"), "profile": synthesizer},
+    })
+
+
 @app.get("/api/kanban/{task_id}/log")
 async def kanban_log(task_id: str, request: Request) -> JSONResponse:
     """Tail of a task's run log — this is the live view of Hermes working."""

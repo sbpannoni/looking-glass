@@ -34,7 +34,8 @@ else. Every other route onto the board produced a card with no worktree:
 
 | route onto the board | isolated before | isolated now |
 |---|---|---|
-| HUD SUBMIT WORK | yes | yes |
+| HUD SUBMIT WORK (single card) | yes | yes |
+| HUD SUBMIT WORK (swarm) | n/a — added 2026-09-02 | yes |
 | `hermes kanban decompose` (auto-decomposer) | **no** | yes |
 | `hermes kanban create` by hand / by an agent | **no** | yes |
 | the Hermes dashboard | **no** | yes |
@@ -96,6 +97,34 @@ in scope when either:
    the board with no link to anything, which lineage cannot see.
 
 Anything else is left alone — see "when it fails" below for why that is safe.
+
+## Filing a swarm from the HUD
+
+`hermes kanban swarm` is the board's other shape: a root card that completes
+on arrival and holds the shared blackboard, N parallel workers, a verifier
+that waits on all of them, a synthesizer that waits on the verifier. SUBMIT
+WORK files one over `POST /api/kanban/swarm`, and the graph lands in scope
+because `created_by` propagates to every card the swarm creates and
+`--created-by looking-glass` is the first thing the lineage check looks at.
+
+The chaining rules below then do something useful for free: workers hang off a
+root with no branch, so each is cut from `origin/master`; the verifier has all
+N workers as parents, so its tree is the workers' branches merged; and the
+synthesizer is cut from the verifier's. The graph's shape is the branch graph.
+
+Three things the endpoint refuses to send, each of them a failure this board
+has actually had:
+
+| refusal | what it prevents |
+|---|---|
+| a verifier profile without `requesting-code-review`, or a synthesizer without `humanizer` | `create_swarm` hardcodes those skills onto the role cards without checking. On 2026-09-02 `--synthesizer researcher` died at agent init with "Unknown skill(s): humanizer" *after* all three workers and the verifier had finished. `coder` cannot synthesize and `researcher` cannot verify, today |
+| a colon in a worker's angle | `parse_worker_arg` splits `--worker` on `:` with maxsplit=2 and reads the third field as a comma-separated skill list, so "Audit X: the four layers" files a card whose skills are `["the four layers"]` |
+| filing at all when the profile list cannot be read | an unchecked swarm risks losing every worker's run at the last card, which is worse than not filing |
+
+Unlike the single-card path this one **dispatches**: swarm workers are created
+`ready`, not `triage`. The panel says so above the button. They still
+serialise on the one GPU seat — a swarm buys structure and a verifier, not
+throughput.
 
 ## Chaining: what a card inherits from its parents
 

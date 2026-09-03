@@ -1062,6 +1062,93 @@ button.tm-review-btn:disabled{opacity:.5; cursor:default; box-shadow:none}
 }
 .sw-parent:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
 
+/* ---- file as: single card, or a swarm ----------------------------------
+   Two shapes of submission share this column. The single-card controls are
+   wrapped in .sw-single so the switch can hide them in one move -- and the
+   wrapper then has to take over the flex duties they had as direct children
+   of the form column: it shrinks (min-height:0) and the follow-up scrolls
+   inside it. That is also why the follow-up's max-height:38% is dropped in
+   here; a percentage height has nothing definite to resolve against inside
+   an auto-height wrapper, which is the same class of bug as the 34vh rules
+   this pane was rebuilt to get rid of. */
+.sw-mode{display:flex; gap:5px; margin-left:auto}
+.sw-mode-btn{
+  background:none; border:1px solid var(--line); border-radius:6px; color:var(--txt-dim);
+  font-family:'Rajdhani'; font-size:11px; letter-spacing:0; padding:2px 9px; cursor:pointer;
+}
+.sw-mode-btn:hover{border-color:var(--cyan); color:var(--cyan)}
+.sw-mode-btn.on{border-color:var(--teal); color:var(--teal);
+  background:color-mix(in srgb, var(--teal) 12%, transparent)}
+.sw-single{display:flex; flex-direction:column; min-height:0; flex:0 1 auto; overflow:hidden}
+/* An author `display` beats the UA sheet's `[hidden]{display:none}` at equal
+   specificity, so the wrapper has to opt back out by hand -- without this the
+   mode switch sets .hidden and BUILDS ON goes on rendering underneath the
+   swarm form, which is exactly what the first screenshot showed. */
+.sw-single[hidden]{display:none}
+.sw-single .sw-followup{max-height:none}
+
+/* In swarm mode the item text yields: it is reference material here, while
+   the form below it is what you are filling in. Same percentage-against-a-
+   definite-flex-column trick .sw-followup already uses in this pane. */
+.sw-col-form.sw-mode-swarm .sw-selected{flex:0 1 auto; max-height:18%}
+/* And the instructions box gives up a little too: in swarm mode the item text
+   plus these notes ARE the goal every card receives, but the form above them
+   is the part that decides whether the run can finish at all. Measured, not
+   guessed: at 1600x1000 the roles row sat 41px below the fold before this. */
+.sw-col-form.sw-mode-swarm .sw-notes{height:54px}
+.sw-swarm{
+  /* Shares the column with .sw-selected (also flex:1 1 auto) rather than
+     asking for content height and losing: at flex:0 1 auto the verifier and
+     synthesizer dropdowns were shrunk off the bottom of the box. Both boxes
+     scroll internally instead. */
+  flex:1 1 auto; min-height:0; overflow-y:auto;
+  margin:7px 9px 0; padding:8px 9px;
+  border:1px solid var(--line); border-left:2px solid var(--magenta);
+  border-radius:6px; background:color-mix(in srgb, var(--magenta) 5%, transparent);
+  scrollbar-width:thin; scrollbar-color:var(--line) transparent;
+}
+/* Amber-on-purpose sentence inside it: this button dispatches where the other
+   one queues, and that is the one thing you must not learn afterwards. */
+.sw-swarm-note{font-size:12px; line-height:1.45; color:var(--txt-dim); margin-bottom:6px}
+.sw-swarm-note b{color:var(--amber)}
+.sw-swarm-note code{color:var(--cyan); font-size:11.5px}
+.sw-swarm-note.err{color:var(--red)}
+.sw-worker{display:flex; align-items:center; gap:6px; margin-bottom:4px}
+.sw-worker-profile, .sw-verifier, .sw-synth{
+  background:var(--bg); border:1px solid var(--line); border-radius:6px;
+  color:var(--txt); font-family:'Rajdhani'; font-size:12.5px; padding:5px 7px; outline:none;
+}
+.sw-worker-profile{flex:0 0 132px}
+.sw-worker-angle{
+  flex:1 1 auto; min-width:0; background:var(--bg); border:1px solid var(--line);
+  border-radius:6px; color:var(--txt); font-family:'Rajdhani'; font-size:12.5px;
+  padding:5px 8px; outline:none;
+}
+.sw-worker-angle:focus, .sw-worker-profile:focus,
+.sw-verifier:focus, .sw-synth:focus{border-color:var(--cyan-dim); box-shadow:0 0 8px #00e5ff33}
+.sw-worker-del{
+  flex:0 0 auto; background:none; border:1px solid var(--line); border-radius:6px;
+  color:var(--txt-dim); font-size:11px; padding:3px 7px; cursor:pointer;
+}
+.sw-worker-del:hover:not(:disabled){border-color:var(--red); color:var(--red)}
+.sw-worker-del:disabled{opacity:.3; cursor:not-allowed}
+.sw-swarm-actions{display:flex; align-items:center; gap:9px; margin-top:6px}
+.sw-worker-add{
+  background:none; border:1px solid var(--line); border-radius:6px; color:var(--txt-dim);
+  font-family:'Rajdhani'; font-size:11px; padding:3px 10px; cursor:pointer;
+}
+.sw-worker-add:hover:not(:disabled){border-color:var(--cyan); color:var(--cyan)}
+.sw-worker-add:disabled{opacity:.35; cursor:not-allowed}
+.sw-swarm-count{font-size:10.5px; color:var(--txt-dim); font-variant-numeric:tabular-nums}
+.sw-roles{display:flex; gap:10px; margin-top:7px}
+.sw-roles label{
+  flex:1 1 0; min-width:0; display:flex; flex-direction:column; gap:4px;
+  font-family:'Orbitron'; font-size:8px; letter-spacing:1.6px; color:var(--txt-dim);
+}
+/* The count is the answer to "why isn't my profile in this list": the swarm
+   hardcodes a skill onto this role's card and not every profile carries it. */
+.sw-role-why{font-family:'Rajdhani'; font-size:10.5px; letter-spacing:0; color:var(--txt-dim)}
+
 /* ---- follow-up: what the parent concluded, and what it feeds ----
    Scrolls on its own rather than growing the form column: a parent with a
    long handoff and eight suggestions must not push Submit off the panel. */

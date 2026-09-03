@@ -39,6 +39,19 @@
    Submissions are deduped server-side by a content hash (see
    /api/kanban/create's --idempotency-key): filing the same item twice
    returns the card already on the board instead of a second copy.
+
+   TWO SHAPES, one picker. `single card` files to triage and lets Hermes's
+   auto-decomposer build the chain -- one card in, an ordered graph out.
+   `swarm` names the workers itself: N parallel angles on the same goal, a
+   verifier that waits on all of them, a synthesizer that waits on the
+   verifier. The swarm shape was proven by hand over ssh on 2026-09-02 and
+   then had no button, so recreating it meant composing the CLI invocation
+   from memory; this is that run, as a form.
+
+   The difference that matters at the button: a triage card QUEUES (the
+   specifier still has to flesh it out), a swarm DISPATCHES -- its workers
+   are created `ready`. Same dedup key for both, so an item filed either way
+   shows as filed and cannot quietly be opened twice.
 ================================================================= */
 
 const SW_COLLAPSED_KEY = "lg-sw-collapsed";
@@ -49,6 +62,15 @@ const SW_SHOW_UI_KEY = "lg-sw-show-ui";
    to be a snapshot taken when the pane opened: a card could go triage ->
    running -> done with this view still showing the moment it was filed. */
 const SW_POLL_MS = 20000;
+
+/* The trio the hand-run swarm used on 2026-09-02 (root t_c4c82bf1): the
+   domain expert, the wet-lab/tooling angle, and the literature angle. A
+   starting point, not a rule -- every row is a dropdown. Profiles that do
+   not exist on hermes are dropped rather than offered. */
+const SW_SWARM_DEFAULT_WORKERS = ["darkhelix", "bioinformatics", "researcher"];
+const SW_SWARM_DEFAULT_VERIFIER = "darkhelix";
+const SW_SWARM_DEFAULT_SYNTH = "researcher";
+const SW_SWARM_MAX_WORKERS = 6;
 
 function submitWorkEsc(s){
   return (s||"").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
@@ -69,7 +91,11 @@ function swState(panel){
     // Per-panel, not module-level. A module global meant closing and
     // reopening the tab restored the previous selection against a freshly
     // loaded (and possibly different) list.
-    panel._sw = {items: [], selected: null, filter: ""};
+    // `mode` is deliberately NOT persisted across opens. Single-card is
+    // the safe default (it queues; a swarm dispatches), and a sticky mode
+    // means the dangerous one can be the one you get by not looking.
+    panel._sw = {items: [], selected: null, filter: "", mode: "single",
+                 profiles: [], profilesError: null, workers: null};
   }
   return panel._sw;
 }
@@ -375,6 +401,228 @@ async function swLoadParentCards(panel){
   swRenderParentOptions(panel);
 }
 
+/* ------------------------------ swarm --------------------------------
+   `hermes kanban swarm` builds a fixed graph: a root card that is completed
+   on arrival and serves as the shared blackboard, N parallel workers, a
+   verifier that waits on every worker, and a synthesizer that waits on the
+   verifier. Everything the workers share -- the TODO item's text and any
+   instructions -- travels as the GOAL, which the swarm appends to every card
+   it creates. A worker's own line is its angle on that goal and nothing
+   else: the CLI uses the worker title as the worker's whole body.
+
+   Three server-side guards back this form, and each is a failure we have had
+   rather than a precaution: the role dropdowns only offer profiles that
+   carry the skill the swarm hardcodes onto that role card (a synthesizer
+   without `humanizer` dies at agent init AFTER every worker has finished --
+   2026-09-02, t_a2f91234), colons are rejected in an angle (the CLI reads
+   everything after one as a skill list), and the whole graph is filed
+   --created-by looking-glass so claim-time provisioning gives every card its
+   own worktree. See server.py's note on POST /api/kanban/swarm. */
+
+function swSwarmReady(state){
+  return !!(state.profiles && state.profiles.length && !state.profilesError);
+}
+
+/* DOM -> state, before anything that re-renders the rows. The inputs are the
+   truth while you are typing in them; state is the truth across a redraw. */
+function swCollectSwarm(panel){
+  const state = swState(panel);
+  const rows = [...panel.querySelectorAll(".sw-worker")];
+  if(rows.length){
+    state.workers = rows.map(row => ({
+      profile: row.querySelector(".sw-worker-profile").value,
+      title: row.querySelector(".sw-worker-angle").value,
+    }));
+  }
+  const ver = panel.querySelector(".sw-verifier");
+  const syn = panel.querySelector(".sw-synth");
+  if(ver && ver.value) state.verifier = ver.value;
+  if(syn && syn.value) state.synthesizer = syn.value;
+}
+
+function swSeedSwarm(panel){
+  const state = swState(panel);
+  const names = state.profiles.map(p => p.name);
+  const pick = (want, cap) => {
+    const row = state.profiles.find(p => p.name === want && (!cap || p[cap]));
+    if(row) return row.name;
+    const any = state.profiles.find(p => !cap || p[cap]);
+    return any ? any.name : "";
+  };
+  if(!state.workers){
+    const seeds = SW_SWARM_DEFAULT_WORKERS.filter(n => names.includes(n));
+    state.workers = (seeds.length ? seeds : names.slice(0, 3))
+      .map(profile => ({profile, title: ""}));
+  }
+  if(!state.verifier) state.verifier = pick(SW_SWARM_DEFAULT_VERIFIER, "can_verify");
+  if(!state.synthesizer) state.synthesizer = pick(SW_SWARM_DEFAULT_SYNTH, "can_synthesize");
+}
+
+/* `cap` names the capability this role needs. A profile that cannot hold the
+   role is not rendered disabled-but-visible: the server refuses it anyway, and
+   a greyed option invites the question "why not" at exactly the moment you are
+   trying to file work. The count under the dropdown answers it once. */
+function swProfileOptions(profiles, selected, cap){
+  return profiles.filter(p => !cap || p[cap])
+    .map(p => `<option value="${submitWorkEsc(p.name)}"${p.name === selected ? " selected" : ""}
+        >${submitWorkEsc(p.name)}</option>`).join("");
+}
+
+function swRenderSwarm(panel){
+  const box = panel.querySelector(".sw-swarm");
+  if(!box) return;
+  const state = swState(panel);
+  if(state.profilesError){
+    box.innerHTML = `<div class="sw-swarm-note err">Cannot read the profiles on
+      hermes (${submitWorkEsc(state.profilesError)}). A swarm hardcodes a skill
+      onto its verifier and synthesizer cards, so filing one without checking
+      the profiles risks losing every worker's run at the last card. Fix the
+      connection, or file this as a single card.</div>`;
+    return;
+  }
+  if(!swSwarmReady(state)){
+    box.innerHTML = `<div class="sw-swarm-note">reading profiles…</div>`;
+    return;
+  }
+  swSeedSwarm(panel);
+  const rows = state.workers.map((w, i) => `
+    <div class="sw-worker" data-i="${i}">
+      <select class="sw-worker-profile">${swProfileOptions(state.profiles, w.profile, null)}</select>
+      <input class="sw-worker-angle" type="text" value="${submitWorkEsc(w.title)}"
+             placeholder="this worker's angle on the goal — one line, no colons">
+      <button class="sw-worker-del" type="button" title="Remove this worker"
+        ${state.workers.length < 2 ? "disabled" : ""}>✕</button>
+    </div>`).join("");
+  const verCount = state.profiles.filter(p => p.can_verify).length;
+  const synCount = state.profiles.filter(p => p.can_synthesize).length;
+  box.innerHTML = `
+    <div class="sw-swarm-note">Every card gets the item text and your
+      instructions as the shared goal; each line below is one worker's angle on
+      it. The verifier waits for all of them, the synthesizer waits for the
+      verifier. <b>Workers are filed <code>ready</code>, not to triage — this
+      button dispatches.</b> They still serialise on the one GPU seat.</div>
+    <div class="sw-workers">${rows}</div>
+    <div class="sw-swarm-actions">
+      <button class="sw-worker-add" type="button"
+        ${state.workers.length >= SW_SWARM_MAX_WORKERS ? "disabled" : ""}
+        >+ worker</button>
+      <span class="sw-swarm-count">${state.workers.length} of ${SW_SWARM_MAX_WORKERS}</span>
+    </div>
+    <div class="sw-roles">
+      <label>VERIFIER
+        <select class="sw-verifier" title="Gets the requesting-code-review skill from the swarm — only profiles that have it are listed">${swProfileOptions(state.profiles, state.verifier, "can_verify")}</select>
+        <span class="sw-role-why">${verCount} of ${state.profiles.length} profiles have requesting-code-review</span>
+      </label>
+      <label>SYNTHESIZER
+        <select class="sw-synth" title="Gets the humanizer skill from the swarm — only profiles that have it are listed">${swProfileOptions(state.profiles, state.synthesizer, "can_synthesize")}</select>
+        <span class="sw-role-why">${synCount} of ${state.profiles.length} profiles have humanizer</span>
+      </label>
+    </div>`;
+}
+
+/* The mode switch. BUILDS ON is hidden rather than disabled in swarm mode:
+   `hermes kanban swarm` has no --parent, so a parent picked here would be
+   silently dropped, and a control that is ignored is worse than one that is
+   not there. */
+function swRenderMode(panel, {redraw = false} = {}){
+  const state = swState(panel);
+  const swarm = state.mode === "swarm";
+  panel.querySelectorAll(".sw-mode-btn").forEach(b =>
+    b.classList.toggle("on", b.dataset.mode === state.mode));
+  const single = panel.querySelector(".sw-single");
+  if(single) single.hidden = swarm;
+  const box = panel.querySelector(".sw-swarm");
+  if(box) box.hidden = !swarm;
+  // The form column has to give the swarm room: the item text and the swarm
+  // box both want to grow, and with the selected item unbounded the role
+  // dropdowns -- the part that carries the "this profile can hold this role"
+  // guarantee -- were shrunk off the bottom of the pane.
+  panel.querySelector(".sw-col-form")?.classList.toggle("sw-mode-swarm", swarm);
+  const btn = panel.querySelector(".sw-submit");
+  if(btn) btn.textContent = swarm ? "Fan out to Hermes" : "Submit to Hermes";
+  // Only draw the form when there is nothing to lose. Flipping modes keeps
+  // the (hidden) rows exactly as typed; a redraw on every flip would empty
+  // three angles because you wanted to re-read the item text.
+  if(swarm && (redraw || !panel.querySelector(".sw-worker"))) swRenderSwarm(panel);
+}
+
+async function swLoadProfiles(panel){
+  const state = swState(panel);
+  try{
+    const r = await fetch("/api/kanban/profiles");
+    const j = await r.json();
+    state.profiles = j.profiles || [];
+    state.profilesError = j.error || (state.profiles.length ? null : "no profiles returned");
+  }catch(err){
+    state.profiles = [];
+    state.profilesError = err.message;
+  }
+  if(state.mode === "swarm" && !panel.querySelector(".sw-worker")) swRenderSwarm(panel);
+}
+
+async function submitWorkSwarm(panel){
+  const state = swState(panel);
+  const item = state.items.find(it => it.id === state.selected);
+  if(!item) return;
+  swCollectSwarm(panel);
+  const status = panel.querySelector(".sw-status");
+  const submitBtn = panel.querySelector(".sw-submit");
+  // A row left blank is not an error, it is an unused row -- but a colon is,
+  // and saying so here beats a 400 after a round trip.
+  const workers = (state.workers || [])
+    .map(w => ({profile: w.profile, title: (w.title || "").trim()}))
+    .filter(w => w.title);
+  if(!workers.length){
+    status.innerHTML = `<span class="err">Give at least one worker an angle.</span>`;
+    return;
+  }
+  const bad = workers.find(w => w.title.includes(":"));
+  if(bad){
+    status.innerHTML = `<span class="err">No colons in an angle — the CLI reads
+      everything after one as a skill list. Fix: ${submitWorkEsc(bad.title.slice(0, 60))}</span>`;
+    return;
+  }
+  const notes = panel.querySelector(".sw-notes").value.trim();
+  const body = notes ? `${item.text}\n\n--- additional instructions ---\n${notes}` : item.text;
+  submitBtn.disabled = true;
+  submitBtn.textContent = "Fanning out…";
+  status.innerHTML = "";
+  try{
+    const r = await fetch("/api/kanban/swarm", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({title: item.title, body, workers,
+                            verifier: state.verifier, synthesizer: state.synthesizer}),
+    });
+    const j = await r.json();
+    if(j.ok){
+      const first = (j.workers || [])[0];
+      status.innerHTML = j.duplicate
+        ? `<span class="warn">This item is already a swarm — root ${submitWorkEsc(j.root)}.
+            Nothing new was filed; opening it…</span>`
+        : `<span class="ok">Swarm filed — root ${submitWorkEsc(j.root)},
+            ${(j.workers || []).length} workers running,
+            verifier ${submitWorkEsc((j.verifier || {}).id || "?")},
+            synthesizer ${submitWorkEsc((j.synthesizer || {}).id || "?")}.</span>`;
+      panel.querySelector(".sw-notes").value = "";
+      state.selected = null;
+      submitWorkLoad(panel);
+      swLoadParentCards(panel);
+      // The root is `done` the moment it exists and has no log of its own --
+      // it is the blackboard, not a run. The first worker is where something
+      // is actually happening.
+      const open = (first && first.id) || j.root;
+      if(open && typeof openTaskLog === "function") openTaskLog(open);
+    }else{
+      status.innerHTML = `<span class="err">${submitWorkEsc(j.error || "unknown error")}</span>`;
+    }
+  }catch(err){
+    status.innerHTML = `<span class="err">${submitWorkEsc(err.message)}</span>`;
+  }
+  submitBtn.textContent = "Fan out to Hermes";
+  submitBtn.disabled = !state.selected;
+}
+
 /* Everything the list actually draws. A background poll that redraws an
    unchanged list would throw away scroll position every 20 seconds, which is
    worse than the staleness it fixes -- so a quiet poll only touches the DOM
@@ -541,9 +789,20 @@ function openSubmitWork(){
             <button class="sw-clear" type="button" hidden
               title="Clear the selection (Esc)">✕ clear</button></div>
           <div class="sw-selected"></div>
-          <div class="sw-bar">BUILDS ON (OPTIONAL)</div>
-          <select class="sw-parent" title="File this as a child of an existing card: the board holds it until that card closes, and its worktree is branched from that card's branch instead of origin/master — so it starts with that work already in the tree."></select>
-          <div class="sw-followup"></div>
+          <div class="sw-bar">FILE AS
+            <span class="sw-mode">
+              <button class="sw-mode-btn on" type="button" data-mode="single"
+                title="One card to triage. Hermes's specifier fleshes it out and the auto-decomposer builds an ordered chain from it.">single card → triage</button>
+              <button class="sw-mode-btn" type="button" data-mode="swarm"
+                title="Parallel workers on one goal, then a verifier, then a synthesizer. Skips triage — the workers are filed ready and dispatch on the next tick.">swarm → fan out</button>
+            </span>
+          </div>
+          <div class="sw-single">
+            <div class="sw-bar">BUILDS ON (OPTIONAL)</div>
+            <select class="sw-parent" title="File this as a child of an existing card: the board holds it until that card closes, and its worktree is branched from that card's branch instead of origin/master — so it starts with that work already in the tree."></select>
+            <div class="sw-followup"></div>
+          </div>
+          <div class="sw-swarm" hidden></div>
           <div class="sw-bar">ADDITIONAL INSTRUCTIONS (OPTIONAL)</div>
           <textarea class="sw-notes" placeholder="anything to add or override…"></textarea>
           <div class="sw-actions">
@@ -560,7 +819,7 @@ function openSubmitWork(){
       submitWorkRenderList(panel);
     };
     panel.querySelector(".sw-reload").onclick = () => {
-      submitWorkLoad(panel); swLoadParentCards(panel);
+      submitWorkLoad(panel); swLoadParentCards(panel); swLoadProfiles(panel);
     };
     panel.querySelector(".sw-blocked-toggle").onclick = () => {
       swPrefSave(SW_SHOW_BLOCKED_KEY, !swPrefLoad(SW_SHOW_BLOCKED_KEY, false));
@@ -571,7 +830,42 @@ function openSubmitWork(){
       submitWorkRenderList(panel);
     };
     panel.querySelector(".sw-sync").onclick = () => submitWorkSync(panel);
-    panel.querySelector(".sw-submit").onclick = () => submitWorkSubmit(panel);
+    panel.querySelector(".sw-submit").onclick = () =>
+      (state.mode === "swarm" ? submitWorkSwarm(panel) : submitWorkSubmit(panel));
+
+    panel.querySelector(".sw-mode").addEventListener("click", (e) => {
+      const btn = e.target.closest(".sw-mode-btn");
+      if(!btn || btn.dataset.mode === state.mode) return;
+      state.mode = btn.dataset.mode;
+      swRenderMode(panel);
+    });
+
+    // Add/remove rebuild the rows, so what is typed has to be read out of the
+    // DOM first -- swCollectSwarm does that -- or removing worker 3 would
+    // silently blank workers 1 and 2.
+    panel.querySelector(".sw-swarm").addEventListener("click", (e) => {
+      if(e.target.closest(".sw-worker-add")){
+        swCollectSwarm(panel);
+        if(state.workers.length < SW_SWARM_MAX_WORKERS){
+          const used = state.workers.map(w => w.profile);
+          const fresh = state.profiles.find(p => !used.includes(p.name));
+          state.workers.push({profile: fresh ? fresh.name : (state.profiles[0] || {}).name,
+                              title: ""});
+        }
+        swRenderSwarm(panel);
+        return;
+      }
+      const del = e.target.closest(".sw-worker-del");
+      if(del){
+        swCollectSwarm(panel);
+        const i = Number(del.closest(".sw-worker").dataset.i);
+        if(state.workers.length > 1) state.workers.splice(i, 1);
+        swRenderSwarm(panel);
+      }
+    });
+    // Dropdowns move without a redraw; keep state in step so a later redraw
+    // does not put the old profile back.
+    panel.querySelector(".sw-swarm").addEventListener("change", () => swCollectSwarm(panel));
     panel.querySelector(".sw-clear").onclick = () => swClearSelection(panel);
     // Esc clears the selection, but only while the focus is actually in this
     // pane -- the HUD binds Esc globally to stop a voice run.
@@ -633,8 +927,12 @@ function openSubmitWork(){
     });
 
     submitWorkRenderSelected(panel);
+    swRenderMode(panel);
     submitWorkLoad(panel);
     swLoadParentCards(panel);
+    // Once per open, not on the poll: profile directories on CT111 do not
+    // move while you are looking at this form, and the server caches them.
+    swLoadProfiles(panel);
     // The picker is a live view of two things that both move underneath it:
     // TODO.md on snarf and the board on hermes. Left as a one-shot read it
     // showed the state at the moment the tab was opened, forever.
