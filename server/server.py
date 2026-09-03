@@ -5903,6 +5903,191 @@ async def kanban_swarm(request: Request) -> JSONResponse:
     })
 
 
+# ---------------------------------------------------- what a card produced
+# A finished card's actual output was reachable only by reading its run log to
+# the end, and the log is a transcript, not a result. The synthesizer of the
+# 2026-09-02 swarm (t_a2f91234) ended with "the actionable output is in
+# synthesis.md in the workspace and posted as a structured comment on the
+# swarm root blackboard" -- two locations, neither of them the card.
+#
+# Both halves are worth surfacing, and they are NOT equally durable:
+#
+#   * the structured comments on the swarm root are rows in kanban.db. They
+#     survive. That is where the workers' audits, the verifier's gate and the
+#     synthesizer's decision matrix actually live.
+#   * a file in the card's workspace does not. `scratch` workspaces are
+#     removed when the card completes, and that is exactly what happened here:
+#     the run metadata still names
+#     /root/.hermes/kanban/workspaces/t_a2f91234/synthesis.md and the
+#     directory is gone.
+#
+# So this endpoint checks the path instead of printing it. A named artifact
+# that is no longer on disk is reported as missing, with the reason -- the
+# same discipline docs/TASK-ISOLATION.md's "artifacts must not misrepresent
+# themselves" section already demands of patches. Printing the path alone
+# would hand you a filename to chase for five minutes.
+
+_ARTIFACT_KEY_RE = re.compile(r"(artifact|report|_path$|_file$|document|output)", re.I)
+_ARTIFACT_MAX_BYTES = 200_000
+_ARTIFACT_MAX_FILES = 6
+_SWARM_COMMENT_RE = re.compile(r"^\[swarm:([a-z_]+)\]\s*(.*)$", re.S)
+_OUTPUT_ANCESTOR_HOPS = 12
+
+
+def _artifact_paths(metadata: dict) -> list[str]:
+    """Absolute file paths a run's metadata names as its output.
+
+    Deliberately narrow: an absolute path with an extension, under a key that
+    says it is an artifact. A blanket "any string starting with /" would pick
+    up repo roots and worktrees, and then this pane would try to cat a
+    directory and report it as a missing artifact."""
+    found: list[str] = []
+    for key, value in (metadata or {}).items():
+        if not isinstance(value, str) or not value.startswith("/"):
+            continue
+        if not _ARTIFACT_KEY_RE.search(key):
+            continue
+        tail = value.rsplit("/", 1)[-1]
+        if "." not in tail or value.endswith("/"):
+            continue
+        if value not in found:
+            found.append(value)
+    return found[:_ARTIFACT_MAX_FILES]
+
+
+def _artifact_host(path: str) -> str:
+    """Which box the path is on. /ssdpool is snarf's pool and does not exist
+    on CT111 at all -- reading it there returns "no such file", which would be
+    reported as a deleted artifact when it is really a wrong host."""
+    return "snarf" if path.startswith("/ssdpool") else _kanban_cfg().get("host", "hermes")
+
+
+async def _read_artifact(path: str) -> dict:
+    """Read one named artifact, or say precisely why it is not there."""
+    host = _artifact_host(path)
+    quoted = shlex.quote(path)
+    cmd = (f"if [ -f {quoted} ]; then wc -c < {quoted}; echo '---8<---'; "
+           f"head -c {_ARTIFACT_MAX_BYTES} {quoted}; "
+           f"elif [ -d {quoted} ]; then echo DIR; else echo MISSING; fi")
+    try:
+        rc, out = await _ssh_run(host, cmd)
+    except Exception as exc:
+        return {"path": path, "host": host, "exists": None, "error": str(exc)}
+    if rc != 0:
+        return {"path": path, "host": host, "exists": None, "error": out[-300:]}
+    head, sep, body = out.partition("---8<---\n")
+    if not sep:
+        state = out.strip()
+        why = ("the path is a directory, not a file" if state == "DIR" else
+               "not on disk. A card's `scratch` workspace is removed when the "
+               "card completes, so a file written there is gone once the run "
+               "that named it finished. What survives is below.")
+        return {"path": path, "host": host, "exists": False, "why": why}
+    try:
+        size = int(head.strip())
+    except ValueError:
+        size = len(body)
+    return {"path": path, "host": host, "exists": True, "bytes": size,
+            "content": body, "truncated": size > len(body)}
+
+
+async def _swarm_blackboard(task_id: str, detail: dict) -> dict | None:
+    """The swarm root's structured comments, for any card in the swarm.
+
+    Every card in a swarm hangs off one root that is completed on arrival and
+    exists to be the shared blackboard (see kanban_swarm.create_swarm), and
+    the workers post their findings onto it as `[swarm:<kind>]` comments. From
+    a leaf, walking up `parents` reaches it; from the root itself the walk is
+    a no-op."""
+    seen = {task_id}
+    cur_id, cur = task_id, detail
+    for _ in range(_OUTPUT_ANCESTOR_HOPS):
+        parents = [p for p in ((cur.get("links") or {}).get("parents") or [])
+                   if p not in seen]
+        if not parents:
+            break
+        cur_id = parents[0]
+        seen.add(cur_id)
+        try:
+            cur = await _kanban_task_detail(cur_id)
+        except Exception:
+            return None
+    entries = []
+    for comment in cur.get("comments") or []:
+        body = (comment.get("body") or "").strip()
+        # Machine chatter about the run, not output. Everything else on the
+        # root IS output: the tagged `[swarm:*]` JSON entries and the plain
+        # prose ones alike. Requiring the tag dropped one of the three
+        # workers' findings on the 2026-09-02 swarm -- bioinformatics posted
+        # its assessment to the root as plain markdown, and a blackboard view
+        # that shows two of three workers is worse than none.
+        if not body or body.startswith("[auto-context]"):
+            continue
+        m = _SWARM_COMMENT_RE.match(body)
+        kind, payload = (m.group(1), m.group(2)) if m else ("note", body)
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            parsed = None
+        entries.append({"kind": kind, "author": comment.get("author"),
+                        "created_at": comment.get("created_at"),
+                        "data": parsed, "text": None if parsed else payload})
+    if not entries:
+        return None
+    task = cur.get("task") or {}
+    return {"root_id": cur_id, "root_title": task.get("title"), "entries": entries}
+
+
+@app.get("/api/kanban/{task_id}/output")
+async def kanban_output(task_id: str) -> JSONResponse:
+    """Everything a finished card actually produced, in one payload.
+
+    Ordered by durability, which is also the order it is worth reading in:
+    the completion summary and its structured metadata (rows in kanban.db),
+    the swarm blackboard if this card is part of one (rows too), the card's
+    own comments, and last the files the metadata names -- checked, not
+    assumed."""
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    try:
+        detail = await _kanban_task_detail(task_id)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+    task = detail.get("task") or {}
+
+    # Newest run that carries a result. A card can have a later run that was
+    # reclaimed before writing one (t_a2f91234 has exactly that), and that
+    # run's silence is not the answer.
+    run = None
+    for r in reversed(detail.get("runs") or []):
+        if r.get("summary") or r.get("metadata"):
+            run = {"summary": r.get("summary") or "", "metadata": r.get("metadata") or {},
+                   "outcome": r.get("outcome") or r.get("status"),
+                   "ended_at": r.get("ended_at"), "profile": r.get("profile")}
+            break
+
+    artifacts = []
+    if run:
+        artifacts = await asyncio.gather(
+            *(_read_artifact(p) for p in _artifact_paths(run["metadata"])))
+
+    blackboard = await _swarm_blackboard(task_id, detail)
+
+    # The card's own comments, minus the machine-written reclaim notices that
+    # are about the run and not about the result.
+    comments = [{"author": c.get("author"), "body": c.get("body") or "",
+                 "created_at": c.get("created_at")}
+                for c in (detail.get("comments") or [])]
+
+    return JSONResponse({
+        "ok": True,
+        "task": {"id": task.get("id"), "title": task.get("title"),
+                 "status": task.get("status"), "assignee": task.get("assignee")},
+        "run": run, "artifacts": list(artifacts), "blackboard": blackboard,
+        "comments": comments,
+    })
+
+
 @app.get("/api/kanban/{task_id}/log")
 async def kanban_log(task_id: str, request: Request) -> JSONResponse:
     """Tail of a task's run log — this is the live view of Hermes working."""

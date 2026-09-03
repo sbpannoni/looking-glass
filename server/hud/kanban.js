@@ -210,7 +210,12 @@ function kbCardInner(t){
   const action = t.status === "blocked"
     ? `<button class="btn kb-card-btn" data-action="unblock" data-id="${kanbanEsc(t.id)}">Unblock</button>`
     : t.status === "done"
-      ? `<button class="btn kb-card-btn" data-action="archive" data-id="${kanbanEsc(t.id)}">Archive</button>`
+      // Findings first: on a finished card the question is almost always
+      // "what did it produce", and the answer used to be reachable only by
+      // reading the run log to the end -- a transcript, not a result.
+      ? `<button class="btn kb-card-btn" data-action="output" data-id="${kanbanEsc(t.id)}"
+           title="What this card produced: its completion summary, the structured facts it recorded, the swarm blackboard if it was part of one, and any file it named — checked against disk">Findings</button>
+         <button class="btn kb-card-btn" data-action="archive" data-id="${kanbanEsc(t.id)}">Archive</button>`
       : t.status === "running"
         ? `<button class="btn kb-card-btn" data-action="reclaim" data-id="${kanbanEsc(t.id)}"
              title="Kill this card's worker and reset it to ready — the dispatcher then starts a FRESH run on its next pass, which costs another model run. Use when a run is wedged: the worker died, the runtime cap fired, or the model endpoint went away, and the card is still marked running. Does not count as a failure, so the retry limit is unaffected.">Reclaim</button>`
@@ -421,6 +426,9 @@ function openKanbanBoard(){
       const btn = e.target.closest(".kb-card-btn");
       if(btn){
         e.stopPropagation();
+        // Findings opens a pane; the rest POST to the board and rewrite the
+        // button in place, which is why they go through a different path.
+        if(btn.dataset.action === "output"){ openTaskOutput(btn.dataset.id); return; }
         const act = KB_CARD_ACTIONS[btn.dataset.action];
         if(act) kanbanCardAction(panel, act.endpoint, act.verb, btn.dataset.id, btn);
         return;
@@ -763,6 +771,141 @@ function openTaskLog(taskId){
     pull();
     const iv = setInterval(pull, 3000);
     tab.onBeforeClose = () => { stopped = true; clearInterval(iv); };
+  });
+}
+
+/* ============================ FINDINGS ==============================
+   What a finished card produced, as opposed to what it did. The run log is a
+   transcript; this is the result, and the two are not the same document.
+
+   The 2026-09-02 swarm made the gap concrete. Its synthesizer signed off with
+   "the actionable output is in synthesis.md in the workspace and posted as a
+   structured comment on the swarm root blackboard" -- so the result lived in
+   two places, neither of them the card you were looking at, and one of them
+   (the workspace file) had already been deleted by the completion that made
+   the card done.
+
+   So the pane is ordered by durability, which is also the order worth reading
+   in: summary, the structured facts the run recorded, the swarm blackboard,
+   the card's comments, and last the files the run named -- each CHECKED, with
+   a plain sentence when one is gone. A path printed without checking it is
+   five minutes of chasing a file that is not there. */
+
+const KB_OUT_MAX_DEPTH = 4;
+
+/* Values in run metadata and blackboard entries are small JSON trees --
+   decision lists, per-tool verdicts, a resource table. Rendered structurally
+   rather than as one JSON blob, because this pane exists to be READ. Depth is
+   capped and the tail falls back to <pre>, so a surprising payload degrades
+   to something ugly-but-complete instead of an empty box. */
+function kbOutValue(v, depth = 0){
+  if(v === null || v === undefined) return `<span class="kb-out-nil">—</span>`;
+  if(Array.isArray(v)){
+    if(!v.length) return `<span class="kb-out-nil">none</span>`;
+    return `<ul class="kb-out-list">${v.map(i =>
+      `<li>${kbOutValue(i, depth + 1)}</li>`).join("")}</ul>`;
+  }
+  if(typeof v === "object"){
+    if(depth >= KB_OUT_MAX_DEPTH){
+      return `<pre class="kb-out-json">${kanbanEsc(JSON.stringify(v, null, 2))}</pre>`;
+    }
+    const rows = Object.entries(v).map(([k, val]) =>
+      `<div class="kb-out-row"><span class="kb-out-key">${kanbanEsc(k)}</span>
+         <div class="kb-out-val">${kbOutValue(val, depth + 1)}</div></div>`).join("");
+    return `<div class="kb-out-obj">${rows}</div>`;
+  }
+  return kanbanEsc(String(v));
+}
+
+function kbOutSection(title, inner, sub){
+  return `<div class="kb-out-sec"><div class="kb-out-head">${kanbanEsc(title)}
+    ${sub ? `<span class="kb-out-sub">${kanbanEsc(sub)}</span>` : ""}</div>${inner}</div>`;
+}
+
+function kbOutRender(panel, j){
+  const box = panel.querySelector(".kb-out-body");
+  if(!j.ok){
+    box.innerHTML = `<div class="kb-out-note err">${kanbanEsc(j.error || "unavailable")}</div>`;
+    return;
+  }
+  const run = j.run;
+  const parts = [];
+
+  parts.push(`<div class="kb-out-title">${kanbanEsc(j.task.title || j.task.id)}</div>
+    <div class="kb-out-meta">${kanbanEsc(j.task.status || "")} ·
+      ${kanbanEsc(j.task.assignee || "—")}${run && run.outcome
+        ? " · run " + kanbanEsc(run.outcome) : ""}</div>`);
+
+  if(run && (run.summary || "").trim()){
+    parts.push(kbOutSection("SUMMARY",
+      `<div class="kb-out-text">${kanbanEsc(run.summary)}</div>`));
+  }else{
+    // Worth saying rather than rendering as an empty pane: a card can finish
+    // without writing a handoff, and then there is genuinely nothing here.
+    parts.push(kbOutSection("SUMMARY",
+      `<div class="kb-out-note">This card's run wrote no summary. Anything it
+        produced is in the sections below, or in its run log.</div>`));
+  }
+
+  const md = (run && run.metadata) || {};
+  if(Object.keys(md).length){
+    parts.push(kbOutSection("RECORDED FACTS", kbOutValue(md),
+                            "structured metadata from the completing run"));
+  }
+
+  if(j.blackboard){
+    const entries = j.blackboard.entries.map(e => {
+      const body = e.data ? kbOutValue(e.data)
+        : `<div class="kb-out-text">${kanbanEsc(e.text || "")}</div>`;
+      return `<div class="kb-out-entry">
+        <div class="kb-out-entry-head"><span class="kb-out-kind">${kanbanEsc(e.kind)}</span>
+          <span class="kb-out-author">${kanbanEsc(e.author || "?")}</span></div>${body}</div>`;
+    }).join("");
+    parts.push(kbOutSection("SWARM BLACKBOARD", entries,
+      `posted on root ${j.blackboard.root_id} — every worker's findings, the gate, the synthesis`));
+  }
+
+  (j.artifacts || []).forEach(a => {
+    if(a.exists){
+      parts.push(kbOutSection(a.path,
+        `<pre class="kb-out-file">${kanbanEsc(a.content || "")}</pre>`,
+        `${a.bytes} bytes on ${a.host}${a.truncated ? " · truncated" : ""}`));
+    }else{
+      parts.push(kbOutSection(a.path,
+        `<div class="kb-out-note warn">${kanbanEsc(a.why || a.error || "unreadable")}</div>`,
+        `named by the run · ${a.host}`));
+    }
+  });
+
+  const comments = (j.comments || []).filter(c => c.body);
+  if(comments.length){
+    parts.push(kbOutSection("COMMENTS ON THIS CARD", comments.map(c =>
+      `<div class="kb-out-entry"><div class="kb-out-entry-head">
+         <span class="kb-out-author">${kanbanEsc(c.author || "?")}</span></div>
+       <div class="kb-out-text">${kanbanEsc(c.body)}</div></div>`).join("")));
+  }
+
+  box.innerHTML = parts.join("");
+}
+
+function openTaskOutput(taskId){
+  openWorkTabTurning("taskoutput", taskId, taskId + " ▸ findings", (panel) => {
+    panel.classList.add("taskoutput-pane");
+    panel.innerHTML = `
+      <div class="kb-out-bar">
+        <span class="kb-out-bar-title">FINDINGS</span>
+        <span class="kb-out-bar-sub">what this card produced — the run log is the transcript, this is the result</span>
+        <span class="kb-out-spacer"></span>
+        <button class="btn kb-out-log">Run log ▸</button>
+      </div>
+      <div class="kb-out-body"><div class="kb-out-note">loading…</div></div>`;
+    panel.querySelector(".kb-out-log").onclick = () => openTaskLog(taskId);
+    // One shot, no poll: a done card's output does not move, and this pane is
+    // only offered on done cards.
+    fetch(`/api/kanban/${encodeURIComponent(taskId)}/output`)
+      .then(r => r.json())
+      .then(j => kbOutRender(panel, j))
+      .catch(err => kbOutRender(panel, {ok: false, error: err.message}));
   });
 }
 

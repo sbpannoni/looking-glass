@@ -376,6 +376,15 @@ Two changes:
 - **Patches are named by commit sha** (`{task_id}-{sha}.patch`), not by attempt
   number. Two artifacts cannot claim one identity, and any reader can check the
   name against the branch. The completion summary names the branch and sha too.
+- **The board surfaces the result, not just the transcript.** A done card has
+  a `Findings` button beside `Archive` (`GET /api/kanban/<id>/output`) showing
+  its completion summary, the structured facts the run recorded, the swarm
+  blackboard if the card was part of a swarm, and every file the run named —
+  each one checked against disk. That last part is this same lesson: the
+  2026-09-02 synthesizer signed off pointing at
+  `~/.hermes/kanban/workspaces/t_a2f91234/synthesis.md`, and a `scratch`
+  workspace is deleted when the card completes, so the path was dead before
+  anyone read it. The pane says so instead of printing it.
 - **The skill says to review the BRANCH, not the patch.** `git show <branch>`
   is definitionally current; a patch is a copy. And before reporting a defect,
   quote `path:line` from the branch — if you cannot point at the line you have
