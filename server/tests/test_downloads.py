@@ -293,29 +293,44 @@ def test_a_plain_download_is_measured_as_a_file_not_a_directory():
 
 # --- the endpoint must not own the transfer ---------------------------------
 
-def _shape(background_list: bool) -> str:
-    """The run command's shape, with a sleep standing in for wget."""
-    tail = "nohup sleep 5 >> /dev/null 2>&1 < /dev/null & echo STARTED $!"
-    return (f"mkdir -p /tmp && {tail}" if background_list
-            else f"mkdir -p /tmp || {{ echo MKDIR_FAILED; exit 1; }}; {tail}")
+SHAPES = {
+    # What the endpoint emits: the download and its rename held together
+    # inside one exec'd process, redirected before it starts.
+    "fixed": "mkdir -p /tmp || { echo MKDIR_FAILED; exit 1; }; "
+             "nohup bash -c 'sleep 5 && true' >> /dev/null 2>&1 < /dev/null & "
+             "echo STARTED $!",
+    # The original bug: `&` binds the whole `mkdir && wget` list, so bash forks
+    # a subshell and the redirection covers only the wget.
+    "background_list": "mkdir -p /tmp && nohup sleep 5 >> /dev/null 2>&1 "
+                       "< /dev/null & echo STARTED $!",
+    # The trap the .part rename invites: needing `wget && mv` makes a compound
+    # the obvious move, and backgrounding it directly puts the subshell back.
+    "bare_compound": "{ sleep 5 && true; } & echo STARTED $!",
+}
+
+
+@pytest.mark.parametrize("shape", ["background_list", "bare_compound"])
+def test_these_shapes_would_hold_the_ssh_channel_open(shape):
+    """capture_output gives the child a pipe, exactly as ssh gives it a
+    channel. A subshell left holding that pipe is how one click sat inside
+    asyncssh for the duration of a 110 GB download."""
+    import subprocess
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run(["bash", "-c", SHAPES[shape]], capture_output=True,
+                       timeout=3)
 
 
 def test_starting_a_download_does_not_hold_the_pipes_open():
-    """capture_output gives the child a pipe, exactly as ssh gives it a channel.
-    Backgrounding the whole `mkdir && wget` list forks a subshell that keeps
-    that pipe open for the life of the transfer -- which is how one click sat
-    in asyncssh for the duration of a 110 GB download."""
     import subprocess
-    r = subprocess.run(["bash", "-c", _shape(background_list=False)],
-                       capture_output=True, timeout=3, text=True)
+    r = subprocess.run(["bash", "-c", SHAPES["fixed"]], capture_output=True,
+                       timeout=3, text=True)
     assert r.stdout.startswith("STARTED")
 
-    with pytest.raises(subprocess.TimeoutExpired):
-        subprocess.run(["bash", "-c", _shape(background_list=True)],
-                       capture_output=True, timeout=3)
 
-
-def test_run_names_its_output_and_backgrounds_only_the_wget(monkeypatch):
+def test_run_downloads_to_a_part_file_and_renames_it(monkeypatch):
+    """The final name must not exist until the bytes are all there: dest is
+    the shared pool, 26 worktrees symlink database/ at it, and wget writes in
+    place."""
     seen = []
 
     async def fake(host, cmd):
@@ -325,9 +340,43 @@ def test_run_names_its_output_and_backgrounds_only_the_wget(monkeypatch):
     monkeypatch.setattr(srv, "_fleet_ssh", fake)
     client.post("/api/darkhelix/downloads/run", json={"entry_id": "gtdbtk"})
     cmd = seen[0]
-    assert f"-O {shlex.quote(srv._entry_target(ENTRY))}" in cmd
+    target = srv._entry_target(ENTRY)
+    assert f"wget -c -O {shlex.quote(target + '.part')}" in cmd
+    assert f"mv -f {shlex.quote(target + '.part')} {shlex.quote(target)}" in cmd
     # -P appears only inside the legacy grep pattern, never as wget's own flag.
     assert "wget -c -P" not in cmd
-    # The mkdir must not be welded to the wget by `&&`, or the whole list ends
-    # up in the background together.
+    # The mkdir must not be welded to the download by `&&`, or the whole list
+    # ends up in the background together.
     assert "MKDIR_FAILED" in cmd and "&& nohup" not in cmd
+
+
+def test_the_probe_matches_the_part_file_being_written(shell):
+    """The running wget names `<target>.part`, so the probe's bare target only
+    matches because grep -F compares substrings. Anchor it and a live transfer
+    reads idle, which is an invitation to start a second one on top of it."""
+    assert shell(srv._wget_writing_probe(ENTRY),
+                 writing=srv._entry_target(ENTRY) + ".part") is True
+
+
+def test_a_transfer_in_progress_reads_as_partial_not_missing(tmp_path, monkeypatch):
+    """Only `<target>.part` exists until the rename, so measuring the final
+    name alone would lose the difference between a download that has never
+    started and one that is half done -- and the button would offer "Download
+    now" where it should offer "Resume"."""
+    import asyncio
+    import subprocess
+
+    async def local(host, cmd):
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+        return r.returncode, r.stdout + r.stderr
+
+    monkeypatch.setattr(srv, "_fleet_ssh", local)
+    target = tmp_path / "DATABASES.tar.gz"
+
+    assert asyncio.run(srv._dest_state(str(target))) == {"present": False}
+    target.with_suffix(".gz.part").write_bytes(b"x" * 1234)
+    assert asyncio.run(srv._dest_state(str(target))) == {"present": True,
+                                                         "bytes": 1234}
+    target.write_bytes(b"x" * 5678)          # the rename lands
+    assert asyncio.run(srv._dest_state(str(target))) == {"present": True,
+                                                         "bytes": 5678}

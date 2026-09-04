@@ -5120,6 +5120,12 @@ def _wget_writing_probe(entry: dict) -> str:
     comparison then happens on pgrep's OUTPUT where grep -F reads the pattern
     as a literal rather than as an ERE.
 
+    Matching the target as a SUBSTRING is load-bearing, not incidental: the
+    download runs against `<target>.part` and is renamed on success, so the
+    running wget's command line carries the .part name and the bare target is
+    a prefix of it. An anchored or exact comparison here would report a live
+    transfer as idle and let a second one start on top of it.
+
     The second -e is for downloads started before this file used `wget -O`:
     `-P <dest> <url>` writes the same target by another spelling. Delete it
     once no such transfer is still in flight."""
@@ -5211,10 +5217,19 @@ async def _dest_state(dest: str) -> dict:
     # disk usage is not file size. The mash sketch reads 413M by blocks and is
     # a complete 754 MB file -- comparing the first number against a remote
     # Content-Length would call a finished download a partial one forever.
+    #
+    # Falling back to `<dest>.part` keeps a transfer in progress reading as
+    # `partial` rather than `missing`: the real name does not exist until the
+    # rename, so measuring only it would lose the distinction between a
+    # download that has never started and one that is half done. A directory
+    # (the archive entries) has no .part, so the branch simply never fires.
+    qp = shlex.quote(f"{dest}.part")
     try:
         rc, out = await _fleet_ssh(
             "snarf",
-            f"if [ -e {q} ]; then du -sb {q} 2>/dev/null | cut -f1; else echo ABSENT; fi")
+            f"if [ -e {q} ]; then du -sb {q} 2>/dev/null | cut -f1; "
+            f"elif [ -e {qp} ]; then du -sb {qp} 2>/dev/null | cut -f1; "
+            "else echo ABSENT; fi")
     except Exception as exc:
         return {"present": None, "error": str(exc)}
     text = (out or "").strip()
@@ -5407,18 +5422,30 @@ async def darkhelix_download_run(request: Request) -> JSONResponse:
     # you get a corrupt archive that checksums differently on every retry.
     guard = (f"{_wget_writing_probe(entry)} && "
              "{ echo ALREADY_RUNNING; exit 0; }; ")
+    # Download to `<target>.part` and rename on success, so the final name
+    # never exists until the bytes are all there. dest is the SHARED pool --
+    # 26 agent worktrees symlink database/ straight at it -- and wget writes
+    # in place, so without this a half-finished 60 GB tarball sits under its
+    # real name for hours, indistinguishable from a complete one to anything
+    # that only checks existence. The rename is within one dataset, so it is
+    # atomic. `wget -c` resumes a .part exactly as it resumes anything else.
+    target = _entry_target(entry)
+    part = f"{target}.part"
     # The mkdir stays in the foreground so a failure is reported rather than
-    # lost, and ONLY the wget is backgrounded. Backgrounding the whole
-    # `mkdir && wget` list forked a subshell that kept the ssh channel's
-    # stdout/stderr pipes open for the life of the transfer, so asyncssh sat
-    # waiting on a 110 GB download and this endpoint never returned -- the
-    # exact thing the docstring above says it must not do. A lone background
-    # command is exec'd, so nothing is left holding the pipes.
+    # lost, and the download runs as ONE backgrounded command whose output is
+    # redirected before it starts. Both halves matter: backgrounding a
+    # `wget && mv` list directly would fork a subshell holding the ssh
+    # channel's stdout/stderr pipes for the life of the transfer, and asyncssh
+    # would then sit on a 110 GB download instead of returning -- the exact
+    # thing the docstring above forbids. `nohup bash -c` keeps the pair
+    # together inside a single exec'd process, with nothing left on the pipes.
+    inner = (f"wget -c -O {shlex.quote(part)} {shlex.quote(url)} && "
+             f"mv -f {shlex.quote(part)} {shlex.quote(target)}")
     cmd = (
         guard +
         f"mkdir -p {shlex.quote(_DOWNLOAD_LOG_DIR)} {shlex.quote(dest)} || "
         "{ echo MKDIR_FAILED; exit 1; }; "
-        f"nohup wget -c -O {shlex.quote(_entry_target(entry))} {shlex.quote(url)} "
+        f"nohup bash -c {shlex.quote(inner)} "
         f">> {shlex.quote(log)} 2>&1 < /dev/null & "
         "echo STARTED $!"
     )
