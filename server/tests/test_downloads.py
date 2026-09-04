@@ -195,10 +195,12 @@ def shell(tmp_path):
     fake.write_text(FAKE_PGREP)
     fake.chmod(0o755)
 
-    def run(probe, *, wget_for=None):
+    def run(probe, *, writing=None, extra=None):
         procs = [f"31337 bash -c {probe}"]          # the shell asking the question
-        if wget_for:
-            procs.append(f"4242 wget -c -P /ssdpool/DARKHELIX/database/x {wget_for}")
+        if writing:
+            procs.append(f"4242 wget -c -O {writing} https://host.invalid/f")
+        if extra:
+            procs.append(extra)
         env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}",
                    FAKE_PROCS="\n".join(procs))
         return subprocess.run(["bash", "-c", probe], env=env,
@@ -208,26 +210,36 @@ def shell(tmp_path):
 
 
 def test_the_probe_ignores_the_shell_that_is_running_it(shell):
-    url = ENTRY["url"]
-    assert shell(srv._wget_running_probe(url)) is False
+    assert shell(srv._wget_writing_probe(ENTRY)) is False
     # The old form, for contrast: nothing is downloading and it still says yes.
-    assert shell(f"pgrep -af {shlex.quote(url)} >/dev/null") is True
+    assert shell(f"pgrep -af {shlex.quote(ENTRY['url'])} >/dev/null") is True
 
 
-def test_the_probe_still_sees_a_real_wget(shell):
-    url = ENTRY["url"]
-    assert shell(srv._wget_running_probe(url), wget_for=url) is True
+def test_the_probe_still_sees_a_wget_writing_the_file(shell):
+    assert shell(srv._wget_writing_probe(ENTRY),
+                 writing=srv._entry_target(ENTRY)) is True
 
 
-def test_the_probe_matches_a_url_containing_regex_metacharacters(shell):
-    """Both Zenodo entries end in `?download=1`, and the old pattern was an
-    ERE: that `?` made the preceding `z` optional, so it matched neither the
-    shell nor the wget. The guard failed the other way round for those two --
-    never tripping, so nothing stopped a second wget onto the same partial
-    file. grep -F compares the URL as text and gets both cases right."""
-    assert shell(srv._wget_running_probe(ZENODO), wget_for=ZENODO) is True
-    assert shell(f"pgrep -af {shlex.quote(ZENODO)} >/dev/null",
-                 wget_for=ZENODO) is False
+def test_the_probe_sees_a_legacy_dash_p_download_of_the_same_file(shell):
+    """`-P <dest> <url>` writes the same target by another spelling. A pull
+    started before this file used -O must still block a second one, or the
+    click lands a competing wget on a half-finished archive."""
+    probe = srv._wget_writing_probe(ENTRY)
+    assert shell(probe) is False          # sanity: no wget in the table at all
+    assert shell(probe,
+                 extra=f"4242 wget -c -P {ENTRY['dest']} {ENTRY['url']}") is True
+
+
+def test_two_entries_sharing_a_url_do_not_block_each_other(shell):
+    """The Zenodo archive unblocks two TODO items and is listed twice, with
+    different destinations. Keyed on the url, starting one refused the other
+    as "already running" while its destination sat empty."""
+    a = dict(ENTRY, id="pathofact-db", url=ZENODO,
+             dest="/ssdpool/DARKHELIX/database/pathofact")
+    b = dict(ENTRY, id="pathofact2-db", url=ZENODO,
+             dest="/ssdpool/DARKHELIX/database/toxin_hmm/pathofact2")
+    assert shell(srv._wget_writing_probe(a), writing=srv._entry_target(a)) is True
+    assert shell(srv._wget_writing_probe(b), writing=srv._entry_target(a)) is False
 
 
 def test_both_endpoints_ask_the_question_the_same_way(monkeypatch):
@@ -241,7 +253,7 @@ def test_both_endpoints_ask_the_question_the_same_way(monkeypatch):
     monkeypatch.setattr(srv, "_fleet_ssh", fake)
     client.post("/api/darkhelix/downloads/run", json={"entry_id": "gtdbtk"})
     client.get("/api/darkhelix/downloads/progress", params={"entry_id": "gtdbtk"})
-    probe = srv._wget_running_probe(ENTRY["url"])
+    probe = srv._wget_writing_probe(ENTRY)
     assert [c for c in seen if probe in c] and all("pgrep -af" not in c for c in seen)
 
 
@@ -314,7 +326,8 @@ def test_run_names_its_output_and_backgrounds_only_the_wget(monkeypatch):
     client.post("/api/darkhelix/downloads/run", json={"entry_id": "gtdbtk"})
     cmd = seen[0]
     assert f"-O {shlex.quote(srv._entry_target(ENTRY))}" in cmd
-    assert "-P " not in cmd
+    # -P appears only inside the legacy grep pattern, never as wget's own flag.
+    assert "wget -c -P" not in cmd
     # The mkdir must not be welded to the wget by `&&`, or the whole list ends
     # up in the background together.
     assert "MKDIR_FAILED" in cmd and "&& nohup" not in cmd

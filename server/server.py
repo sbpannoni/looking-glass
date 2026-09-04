@@ -5083,23 +5083,6 @@ _URL_CHECKS: dict = {}
 _DOWNLOAD_LOG_DIR = "/ssdpool/agent-work/downloads"
 
 
-def _wget_running_probe(url: str) -> str:
-    """Shell test for "is a wget for this URL already going on snarf?".
-
-    Deliberately not `pgrep -f <url>`. ssh runs our command in a remote
-    `bash -c`, so the URL sits in that shell's own argv, and pgrep excludes
-    its own pid but not its parent's -- it matched the very process asking the
-    question. The guard tripped on every call, so `run` never reached its wget
-    and `progress` never reported anything but RUNNING.
-
-    Narrowing pgrep to wget processes means the caller cannot be one. The URL
-    comparison then happens on pgrep's OUTPUT, where grep -F reads it as a
-    literal; that half matters on its own, because the old pattern was an ERE
-    and two catalogue URLs end in `?download=1`, whose `?` made the preceding
-    character optional and so would have missed a wget that really was up."""
-    return f"pgrep -a wget | grep -Fq -- {shlex.quote(url)}"
-
-
 def _entry_target(entry: dict) -> str:
     """The full path the bytes end up at.
 
@@ -5116,6 +5099,33 @@ def _entry_target(entry: dict) -> str:
     snarf, it writes `DATABASES.tar.gz?download=1` literally."""
     name = entry.get("filename") or urlsplit(entry["url"]).path.rsplit("/", 1)[-1]
     return f"{entry['dest'].rstrip('/')}/{name}"
+
+
+def _wget_writing_probe(entry: dict) -> str:
+    """Shell test for "is anything already writing this entry's file?".
+
+    Keyed on the target path, not the URL. The hazard being guarded is two
+    wgets onto one partial file; two entries may legitimately pull the SAME
+    url to different destinations, and both PathoFact entries do exactly that
+    -- the catalogue lists the Zenodo archive twice because it unblocks two
+    TODO items with different wire-in work. Keying on the url refused the
+    second one as "already running" while its destination sat empty.
+
+    Deliberately not `pgrep -f <pattern>`. ssh runs our command in a remote
+    `bash -c`, so the pattern sits in that shell's own argv, and pgrep
+    excludes its own pid but not its parent's -- it matched the very process
+    asking the question. The guard tripped on every call, so `run` never
+    reached its wget and `progress` never reported anything but RUNNING.
+    Narrowing pgrep to wget processes means the caller cannot be one, and the
+    comparison then happens on pgrep's OUTPUT where grep -F reads the pattern
+    as a literal rather than as an ERE.
+
+    The second -e is for downloads started before this file used `wget -O`:
+    `-P <dest> <url>` writes the same target by another spelling. Delete it
+    once no such transfer is still in flight."""
+    legacy = f"-P {entry['dest']} {entry['url']}"
+    return ("pgrep -a wget | grep -Fq "
+            f"-e {shlex.quote(_entry_target(entry))} -e {shlex.quote(legacy)}")
 
 
 def _entry_probe_path(entry: dict) -> str:
@@ -5395,7 +5405,7 @@ async def darkhelix_download_run(request: Request) -> JSONResponse:
     log = f"{_DOWNLOAD_LOG_DIR}/{entry_id}.log"
     # One at a time per entry: a second wget onto the same partial file is how
     # you get a corrupt archive that checksums differently on every retry.
-    guard = (f"{_wget_running_probe(url)} && "
+    guard = (f"{_wget_writing_probe(entry)} && "
              "{ echo ALREADY_RUNNING; exit 0; }; ")
     # The mkdir stays in the foreground so a failure is reported rather than
     # lost, and ONLY the wget is backgrounded. Backgrounding the whole
@@ -5449,7 +5459,7 @@ async def darkhelix_download_progress(entry_id: str) -> JSONResponse:
     try:
         rc, out = await _fleet_ssh(
             "snarf",
-            f"{_wget_running_probe(entry['url'])} && echo RUNNING || echo IDLE; "
+            f"{_wget_writing_probe(entry)} && echo RUNNING || echo IDLE; "
             f"tail -c 1200 {shlex.quote(log)} 2>/dev/null | tr '\\r' '\\n' | tail -6")
     except Exception as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
