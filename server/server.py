@@ -4796,8 +4796,7 @@ async def darkhelix_verify(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
-@app.post("/api/darkhelix/land")
-async def darkhelix_land(request: Request) -> JSONResponse:
+async def _darkhelix_land(task_id: str, check: str = "tests", open_pr: bool = True) -> dict:
     """Take a card's finished worktree from "worker stopped" to "reviewable".
 
         verify -> commit -> push -> PR
@@ -4815,28 +4814,25 @@ async def darkhelix_land(request: Request) -> JSONResponse:
     Every failure reroutes the work back onto the board: the card is blocked
     with the reason (which `hermes kanban block` also files as a comment), so
     it reappears in the blocked lane with its cause attached instead of
-    failing silently off-screen."""
-    payload = await request.json()
-    task_id = (payload.get("task_id") or "").strip()
-    if not _TASK_ID_RE.match(task_id):
-        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
-    check = (payload.get("check") or "tests").strip()
+    failing silently off-screen.
+
+    Returns a plain dict, not a JSONResponse -- this is also called from the
+    autonomous poller and the manual auto-land trigger below, neither of
+    which is inside a request handler."""
     spec = DARKHELIX_CHECKS.get(check)
     if spec is None:
-        return JSONResponse({"ok": False, "error": f"unknown check: {check!r}"},
-                            status_code=400)
-    open_pr = bool(payload.get("pr", True))
+        return {"ok": False, "error": f"unknown check: {check!r}"}
     branch, wt = _dh_branch(task_id), _dh_worktree(task_id)
     steps: list[dict] = []
 
-    async def fail(stage: str, detail: str) -> JSONResponse:
+    async def fail(stage: str, detail: str) -> dict:
         reason = f"land failed at {stage}: {detail[:400]}"
         rerouted = await _kanban_block(task_id, reason)
         if not steps or steps[-1].get("stage") != stage:
             steps.append({"stage": stage, "ok": False, "detail": detail[-1500:]})
-        return JSONResponse({"ok": False, "stage": stage, "steps": steps,
-                             "branch": branch, "rerouted_to_kanban": rerouted,
-                             "error": detail[-1500:]}, status_code=200)
+        return {"ok": False, "stage": stage, "steps": steps,
+                "branch": branch, "rerouted_to_kanban": rerouted,
+                "error": detail[-1500:]}
 
     async def run(stage: str, cmd: str, allow_fail: bool = False):
         """Run one stage in the card's worktree. ALWAYS records a step --
@@ -4892,7 +4888,7 @@ async def darkhelix_land(request: Request) -> JSONResponse:
         result["pushed"] = False
         result["pr_skipped"] = "verification failed"
         result["rerouted_to_kanban"] = await _kanban_block(task_id, reason)
-        return JSONResponse(result)
+        return result
 
     # 4. push -- the hook re-runs the suite here and should agree with step 1
     ok, out = await run("push", f"git push -u origin {shlex.quote(branch)}")
@@ -4902,7 +4898,7 @@ async def darkhelix_land(request: Request) -> JSONResponse:
 
     if not open_pr:
         result["pr_skipped"] = "pr not requested"
-        return JSONResponse(result)
+        return result
 
     title = f"[hermes] {task_id}: kanban work"
     body = (f"Filed from the Looking Glass HUD for kanban card `{task_id}`.\n\n"
@@ -4919,7 +4915,356 @@ async def darkhelix_land(request: Request) -> JSONResponse:
     url = next((ln.strip() for ln in out.splitlines()
                 if ln.strip().startswith("https://")), None)
     result["pr_url"] = url
+    return result
+
+
+@app.post("/api/darkhelix/land")
+async def darkhelix_land(request: Request) -> JSONResponse:
+    """HTTP wrapper for _darkhelix_land -- see that function for the actual
+    verify -> commit -> push -> PR sequence. Also the entry point the
+    autonomous poller and the "Land Autonomously" trigger below call into,
+    so this stays a thin adapter rather than duplicating the logic."""
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    check = (payload.get("check") or "tests").strip()
+    if check not in DARKHELIX_CHECKS:
+        return JSONResponse({"ok": False, "error": f"unknown check: {check!r}"},
+                            status_code=400)
+    open_pr = bool(payload.get("pr", True))
+    result = await _darkhelix_land(task_id, check=check, open_pr=open_pr)
     return JSONResponse(result)
+
+
+# ------------------------------------------------- DARKHELIX autonomous landing
+# Extends _darkhelix_land (verify -> commit -> push -> PR) with the two steps
+# nothing did before: wait for the PR's own CI to go green, then merge it --
+# with no human or Claude clicking anything in between.
+#
+# GATED ON REVIEW, deliberately narrow: a card only qualifies once its history
+# carries a `review_requested` event (kanban_db.py's request_review, fired on
+# CT111 when a card enters the board's `review` lane). That is, it went
+# through review and a reviewer -- today, the bundled sdlc-review agent --
+# approved it into `done`. A card marked done by the older direct
+# `hermes kanban complete` path (still what darkhelix-engine does as of
+# 2026-09-04) carries no such event and is skipped, not landed, until that
+# plugin is changed to request review instead of completing directly. That is
+# deliberate: this whole path stays dormant for existing cards until the
+# upstream gate exists to feed it.
+#
+# NO BRANCH PROTECTION IS POSSIBLE HERE. DARKHELIX is a private repo on
+# GitHub Free -- `gh api repos/sbpannoni/DARKHELIX/branches/master/protection`
+# and `.../rulesets` both 403 ("Upgrade to GitHub Pro..."), confirmed
+# 2026-09-04. GitHub cannot enforce a merge gate for this repo, so
+# _dh_wait_for_checks's polling loop below IS the gate -- it must never merge
+# on anything but a status it checked itself, never on a webhook, a timer, or
+# an assumption that "it probably passed by now".
+def _dh_land_cfg() -> dict:
+    return CFG.get("darkhelix") or {}
+
+
+LAND_STATE_PATH = ROOT / "logs" / "land_darkhelix.json"
+_DH_LAND_SEEN_MAX = 500
+_DH_LAND_STATE: dict = {"seeded": False, "seen": []}
+_DH_LAND_STATUS: dict = {
+    "enabled": False, "seeded": False, "last_tick": None, "last_error": None,
+    "note": None, "landed": 0, "recent": [],
+}
+
+
+def _dh_land_load_state() -> None:
+    global _DH_LAND_STATE
+    try:
+        data = json.loads(LAND_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if isinstance(data, dict) and isinstance(data.get("seen"), list):
+        _DH_LAND_STATE = {
+            "seeded": bool(data.get("seeded")),
+            "seen": [str(i) for i in data["seen"]][-_DH_LAND_SEEN_MAX:],
+        }
+
+
+def _dh_land_save_state() -> None:
+    try:
+        LAND_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LAND_STATE_PATH.write_text(json.dumps(_DH_LAND_STATE), encoding="utf-8")
+    except Exception:
+        # Same contract as verify's state file: a sweep that cannot persist
+        # still lands correctly this run; it would only re-seed after a
+        # restart. Not worth stopping for.
+        pass
+
+
+def _dh_land_mark_seen(task_id: str) -> None:
+    seen = _DH_LAND_STATE["seen"]
+    if task_id in seen:
+        return
+    seen.append(task_id)
+    del seen[:-_DH_LAND_SEEN_MAX]
+
+
+def _dh_land_record(entry: dict) -> None:
+    entry["at"] = time.time()
+    _DH_LAND_STATUS["recent"] = ([entry] + _DH_LAND_STATUS["recent"])[:20]
+
+
+async def _dh_reviewed(task_id: str) -> bool:
+    """True once the card's history carries a review_requested event -- see
+    the module comment above for why this is the gate rather than just
+    checking `status == "done"`."""
+    try:
+        detail = await _kanban_api_get(f"/api/plugins/kanban/tasks/{quote(task_id)}")
+    except Exception:
+        return False
+    return any(e.get("kind") == "review_requested" for e in detail.get("events") or [])
+
+
+def _dh_pr_number(pr_url: str) -> str:
+    return pr_url.rstrip("/").rsplit("/", 1)[-1]
+
+
+async def _dh_pr_diff_within_cap(pr_number: str, cfg: dict) -> tuple[bool, str]:
+    """A cheap circuit breaker: refuse to auto-merge a diff past a size that
+    stops being "small enough to trust unattended" -- autonomous pipeline or
+    not, a human should look at a big change before it reaches master."""
+    max_files = int(cfg.get("auto_merge_max_files") or 15)
+    max_lines = int(cfg.get("auto_merge_max_lines") or 400)
+    cmd = (f"cd {shlex.quote(DARKHELIX_REPO_PATH)} && "
+           f"gh pr view {shlex.quote(pr_number)} --json additions,deletions,changedFiles")
+    try:
+        rc, out = await _fleet_ssh("snarf", cmd)
+    except Exception as exc:
+        return False, f"could not read PR size: {exc}"
+    if rc != 0:
+        return False, f"gh pr view failed: {out[-300:]}"
+    try:
+        stat = json.loads(out)
+        files = int(stat["changedFiles"])
+        lines = int(stat["additions"]) + int(stat["deletions"])
+    except Exception as exc:
+        return False, f"could not parse PR size: {exc}"
+    if files > max_files or lines > max_lines:
+        return False, (f"diff too large for autonomous merge ({files} files / "
+                       f"{lines} lines, cap is {max_files}/{max_lines}) -- "
+                       "left for a human to merge")
+    return True, ""
+
+
+async def _dh_wait_for_checks(pr_number: str, cfg: dict) -> tuple[bool, str]:
+    """Poll gh's own view of the PR's checks until they resolve. See the
+    module comment: this loop IS the merge gate, not a convenience on top of
+    one GitHub already enforces -- branch protection is unavailable on this
+    repo."""
+    timeout = int(cfg.get("merge_check_timeout_seconds") or 1800)
+    interval = int(cfg.get("merge_check_poll_seconds") or 30)
+    deadline = time.monotonic() + timeout
+    cmd = (f"cd {shlex.quote(DARKHELIX_REPO_PATH)} && "
+           f"gh pr checks {shlex.quote(pr_number)} --json name,state,bucket")
+    while True:
+        try:
+            rc, out = await _fleet_ssh("snarf", cmd)
+        except Exception as exc:
+            return False, f"could not read checks: {exc}"
+        checks: list[dict] = []
+        # `gh pr checks` exits 1 the instant nothing has run yet on a brand
+        # new PR ("no checks reported") -- that is pending, not a failure, so
+        # only attempt to parse when there is plausibly JSON to parse.
+        if "no checks reported" not in out.lower():
+            try:
+                checks = json.loads(out)
+            except Exception:
+                checks = []
+        buckets = {c.get("bucket") for c in checks}
+        if checks and "fail" in buckets:
+            failed = [c["name"] for c in checks if c.get("bucket") == "fail"]
+            return False, f"check(s) failed: {', '.join(failed)}"
+        if checks and not ({"pending", ""} & buckets):
+            return True, f"{len(checks)} check(s) green"
+        if time.monotonic() >= deadline:
+            return False, f"timed out after {timeout}s waiting for checks"
+        await asyncio.sleep(interval)
+
+
+async def _darkhelix_autoland_one(task_id: str) -> dict:
+    """The whole unattended sequence for one card:
+
+        verify -> commit -> push -> PR -> wait for CI -> merge
+
+    Callers (the poller and the manual trigger below) both gate on
+    _dh_reviewed first -- this function does not check it itself, so the
+    reason a card was skipped is visible at the call site."""
+    cfg = _dh_land_cfg()
+    land = await _darkhelix_land(task_id)
+    if not land.get("pr_url"):
+        # _darkhelix_land already blocked the card (a verify/commit/push/pr
+        # failure) or intentionally stopped short (verify failed, no PR
+        # opened). Either way the card already carries the reason.
+        return {"ok": False, "stage": "land", **land}
+
+    pr_url = land["pr_url"]
+    pr_number = _dh_pr_number(pr_url)
+
+    size_ok, size_reason = await _dh_pr_diff_within_cap(pr_number, cfg)
+    if not size_ok:
+        await _kanban_block(task_id, f"opened {pr_url} but left it for a human: "
+                            f"{size_reason}", kind="needs_input")
+        return {"ok": False, "stage": "size-cap", "pr_url": pr_url, "reason": size_reason}
+
+    checks_ok, checks_reason = await _dh_wait_for_checks(pr_number, cfg)
+    if not checks_ok:
+        await _kanban_block(task_id, f"opened {pr_url}, CI did not pass: "
+                            f"{checks_reason}", kind="needs_input")
+        return {"ok": False, "stage": "checks", "pr_url": pr_url, "reason": checks_reason}
+
+    cmd = (f"cd {shlex.quote(DARKHELIX_REPO_PATH)} && "
+           f"gh pr merge {shlex.quote(pr_number)} --squash --delete-branch")
+    try:
+        rc, out = await _fleet_ssh("snarf", cmd)
+    except Exception as exc:
+        await _kanban_block(task_id, f"opened {pr_url}, CI passed, merge failed: "
+                            f"{exc}", kind="needs_input")
+        return {"ok": False, "stage": "merge", "pr_url": pr_url, "error": str(exc)}
+    if rc != 0:
+        await _kanban_block(task_id, f"opened {pr_url}, CI passed, merge failed: "
+                            f"{out[-500:]}", kind="needs_input")
+        return {"ok": False, "stage": "merge", "pr_url": pr_url, "error": out[-1500:]}
+
+    try:
+        await asyncio.to_thread(
+            _kanban_api_call, "POST",
+            f"/api/plugins/kanban/tasks/{quote(task_id)}/comments",
+            json={"author": "looking-glass",
+                  "body": f"Landed autonomously: {pr_url} merged (squash, branch "
+                          f"deleted). No human or Claude reviewed this merge -- "
+                          f"checks were `{checks_reason}` before it went in. "
+                          "Revert with `scripts/darkhelix-revert.sh <merge-sha>` "
+                          "on snarf if this turns out to be wrong."})
+    except Exception:
+        pass
+    return {"ok": True, "stage": "merged", "pr_url": pr_url}
+
+
+async def _land_darkhelix_tick() -> None:
+    done = await _dh_done_task_ids()
+
+    if not _DH_LAND_STATE["seeded"]:
+        for task_id in done:
+            _dh_land_mark_seen(task_id)
+        _DH_LAND_STATE["seeded"] = True
+        _dh_land_save_state()
+        _DH_LAND_STATUS["seeded"] = True
+        _DH_LAND_STATUS["note"] = (
+            f"seeded {len(done)} already-done card(s) without landing them; "
+            "autonomous landing applies to completions from here on")
+        return
+
+    seen = set(_DH_LAND_STATE["seen"])
+    fresh = [t for t in done if t not in seen]
+    if not fresh:
+        return
+
+    limit = int(_dh_land_cfg().get("land_max_per_tick") or 3)
+    for task_id in fresh[:limit]:
+        # Claimed regardless of outcome below -- a background task now owns
+        # this card, same "only ever judged once" contract as verify's seen
+        # set.
+        _dh_land_mark_seen(task_id)
+        if not await _dh_reviewed(task_id):
+            _dh_land_record({"task_id": task_id, "verdict": "skipped",
+                             "reason": "no review_requested event on this card"})
+            continue
+        _dh_land_record({"task_id": task_id, "verdict": "landing"})
+
+        async def _run_one(tid: str = task_id) -> None:
+            try:
+                result = await _darkhelix_autoland_one(tid)
+                if result.get("ok"):
+                    _DH_LAND_STATUS["landed"] += 1
+                _dh_land_record({"task_id": tid,
+                                 "verdict": "merged" if result.get("ok") else "blocked",
+                                 "stage": result.get("stage"),
+                                 "pr_url": result.get("pr_url")})
+            except Exception as exc:
+                _dh_land_record({"task_id": tid, "verdict": "error",
+                                 "error": str(exc)[:300]})
+
+        # Fired as its own task, not awaited here: a merge-check wait can run
+        # up to merge_check_timeout_seconds (default 30m) and must not stall
+        # this tick from noticing the NEXT card that clears review in the
+        # meantime.
+        asyncio.get_running_loop().create_task(_run_one())
+    _dh_land_save_state()
+
+
+async def _land_darkhelix_forever() -> None:
+    """Off unless `darkhelix.auto_land` is true -- same opt-in contract as
+    _verify_completions_forever, for a sharper reason: this does not just
+    read the board, it pushes to GitHub and merges to master on its own."""
+    if not _dh_land_cfg().get("auto_land"):
+        return
+    _dh_land_load_state()
+    _DH_LAND_STATUS["enabled"] = True
+    _DH_LAND_STATUS["seeded"] = _DH_LAND_STATE["seeded"]
+    while True:
+        try:
+            await _land_darkhelix_tick()
+            _DH_LAND_STATUS["last_error"] = None
+        except Exception as exc:
+            _DH_LAND_STATUS["last_error"] = str(exc)[:300]
+        _DH_LAND_STATUS["last_tick"] = time.time()
+        await asyncio.sleep(int(_dh_land_cfg().get("land_poll_seconds") or 120))
+
+
+@app.get("/api/kanban/land-darkhelix")
+async def kanban_land_darkhelix_status() -> JSONResponse:
+    """Whether the autonomous poller is running and what it has done -- same
+    detective-control contract as /api/kanban/verify-completion."""
+    return JSONResponse({
+        **_DH_LAND_STATUS,
+        "seen_count": len(_DH_LAND_STATE["seen"]),
+        "poll_seconds": int(_dh_land_cfg().get("land_poll_seconds") or 120),
+    })
+
+
+@app.post("/api/darkhelix/land-auto")
+async def darkhelix_land_auto(request: Request) -> JSONResponse:
+    """The manual trigger: land THIS card the same way the background poller
+    would -- verify, commit, push, PR, wait for CI, merge -- with no further
+    click required once this fires. Runs in the background because the CI
+    wait can take a long time and must not hold an HTTP request open;
+    /api/kanban/land-darkhelix carries the outcome, same as the automatic
+    path."""
+    payload = await request.json()
+    task_id = (payload.get("task_id") or "").strip()
+    if not _TASK_ID_RE.match(task_id):
+        return JSONResponse({"ok": False, "error": "bad task id"}, status_code=400)
+    reviewed = await _dh_reviewed(task_id)
+    if not reviewed and not bool(payload.get("skip_review_check")):
+        return JSONResponse({
+            "ok": False,
+            "error": ("this card has no review_requested event -- it has not been "
+                      "through the board's review lane. Pass skip_review_check:true "
+                      "to land it anyway (e.g. for a card completed before the "
+                      "review-lane gate existed)."),
+        }, status_code=409)
+
+    async def _run() -> None:
+        try:
+            result = await _darkhelix_autoland_one(task_id)
+            if result.get("ok"):
+                _DH_LAND_STATUS["landed"] += 1
+            _dh_land_record({"task_id": task_id,
+                             "verdict": "merged" if result.get("ok") else "blocked",
+                             "stage": result.get("stage"), "pr_url": result.get("pr_url"),
+                             "trigger": "manual"})
+        except Exception as exc:
+            _dh_land_record({"task_id": task_id, "verdict": "error",
+                             "error": str(exc)[:300], "trigger": "manual"})
+
+    asyncio.get_running_loop().create_task(_run())
+    return JSONResponse({"ok": True, "started": True, "task_id": task_id})
 
 
 def _submission_key(title: str, body: str) -> str:
@@ -6773,6 +7118,7 @@ async def start_activity_feed() -> None:
     asyncio.get_running_loop().create_task(_poll_hermes_sessions_forever())
     asyncio.get_running_loop().create_task(_poll_network_topology_forever())
     asyncio.get_running_loop().create_task(_verify_completions_forever())
+    asyncio.get_running_loop().create_task(_land_darkhelix_forever())
     asyncio.get_running_loop().create_task(_poll_pool_manifest_forever())
     asyncio.get_running_loop().create_task(_poll_enforce_blocks_forever())
 

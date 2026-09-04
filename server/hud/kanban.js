@@ -585,6 +585,61 @@ async function kbWireVerify(panel, taskId){
     }
     landBtn.disabled = false; btn.disabled = false;
   };
+
+  /* Land Autonomously: same verify -> commit -> push -> PR as the button
+     above, then wait for the PR's own CI and merge on green -- no further
+     click. Runs in the background on the server (a CI wait can take a long
+     time), so this fires the request, then polls the shared status feed for
+     THIS card's outcome rather than waiting on the fetch itself. */
+  const autoBtn = panel.querySelector(".kb-autoland-btn");
+  let autoPoll = null;
+  autoBtn.onclick = async () => {
+    if(autoPoll) return;
+    autoBtn.disabled = true; landBtn.disabled = true; btn.disabled = true;
+    status.innerHTML = `<span class="warn">starting autonomous land…</span>`;
+    out.hidden = true;
+    try{
+      const r = await fetch("/api/darkhelix/land-auto", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({task_id: taskId}),
+      });
+      const j = await r.json();
+      if(!j.ok){
+        status.innerHTML = `<span class="err">${kanbanEsc(j.error || "failed to start")}</span>`;
+        autoBtn.disabled = false; landBtn.disabled = false; btn.disabled = false;
+        return;
+      }
+      status.innerHTML = `<span class="warn">landing — verify, push, PR, then waiting on CI…</span>`;
+      const started = Date.now();
+      autoPoll = setInterval(async () => {
+        try{
+          const sr = await fetch("/api/kanban/land-darkhelix");
+          const sj = await sr.json();
+          const mine = (sj.recent || []).find(e => e.task_id === taskId && e.trigger === "manual"
+                                                    && e.at * 1000 >= started);
+          if(!mine) return;
+          if(mine.verdict === "merged"){
+            status.innerHTML = `<span class="ok">merged</span>` +
+              (mine.pr_url ? ` · <a href="${kanbanEsc(mine.pr_url)}" target="_blank" rel="noreferrer">PR</a>` : "");
+            clearInterval(autoPoll); autoPoll = null;
+            autoBtn.disabled = false; landBtn.disabled = false; btn.disabled = false;
+            refreshOpenKanbanBoards();
+          }else if(mine.verdict === "blocked" || mine.verdict === "error"){
+            status.innerHTML = `<span class="err">stopped at ${kanbanEsc(mine.stage || mine.verdict)}</span>` +
+              (mine.pr_url ? ` · <a href="${kanbanEsc(mine.pr_url)}" target="_blank" rel="noreferrer">PR</a> left open for a human` : "") +
+              (mine.error ? ` · ${kanbanEsc(mine.error)}` : "");
+            clearInterval(autoPoll); autoPoll = null;
+            autoBtn.disabled = false; landBtn.disabled = false; btn.disabled = false;
+            refreshOpenKanbanBoards();
+          }
+        }catch{ /* transient poll failure -- try again next tick */ }
+      }, 5000);
+    }catch(err){
+      status.innerHTML = `<span class="err">${kanbanEsc(err.message)}</span>`;
+      autoBtn.disabled = false; landBtn.disabled = false; btn.disabled = false;
+    }
+  };
 }
 
 /* A land that reroutes changes the board, so any open board pane should show
@@ -684,6 +739,7 @@ function openTaskLog(taskId){
         <button class="btn kb-verify-btn" disabled>Run</button>
         <label class="kb-verify-file"><input type="checkbox" checked> file result on the card</label>
         <button class="btn kb-land-btn" title="Verify, commit, push the card's branch, and open a PR if the check passes">Land ▸</button>
+        <button class="btn kb-autoland-btn" title="Land, then wait for the PR's CI and merge on green -- no further click. Requires the card to have gone through review.">Land Autonomously ▸▸</button>
         <span class="kb-verify-status"></span>
       </div>
       <div class="kb-edit">
