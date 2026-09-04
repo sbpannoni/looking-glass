@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator, Iterator
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import asyncssh
 import requests
@@ -5083,6 +5083,52 @@ _URL_CHECKS: dict = {}
 _DOWNLOAD_LOG_DIR = "/ssdpool/agent-work/downloads"
 
 
+def _wget_running_probe(url: str) -> str:
+    """Shell test for "is a wget for this URL already going on snarf?".
+
+    Deliberately not `pgrep -f <url>`. ssh runs our command in a remote
+    `bash -c`, so the URL sits in that shell's own argv, and pgrep excludes
+    its own pid but not its parent's -- it matched the very process asking the
+    question. The guard tripped on every call, so `run` never reached its wget
+    and `progress` never reported anything but RUNNING.
+
+    Narrowing pgrep to wget processes means the caller cannot be one. The URL
+    comparison then happens on pgrep's OUTPUT, where grep -F reads it as a
+    literal; that half matters on its own, because the old pattern was an ERE
+    and two catalogue URLs end in `?download=1`, whose `?` made the preceding
+    character optional and so would have missed a wget that really was up."""
+    return f"pgrep -a wget | grep -Fq -- {shlex.quote(url)}"
+
+
+def _entry_target(entry: dict) -> str:
+    """The full path the bytes end up at.
+
+    `dest` is a directory, always -- two entries used to name a file there
+    instead, and the run command handed every one of them to `wget -P`. For a
+    dest that did not exist that made a DIRECTORY of the filename and dropped
+    the file inside it (`conoserver_protein.fa.gz/conoserver_protein.fa.gz`);
+    for one that existed as a file, `mkdir -p` failed and the `&&` swallowed
+    the download silently.
+
+    The name comes from `filename` when the catalogue gives one, else from the
+    URL path -- .path, so a query string cannot leak into it. Both Zenodo URLs
+    end `?download=1`, and wget names a file from the full URL: verified on
+    snarf, it writes `DATABASES.tar.gz?download=1` literally."""
+    name = entry.get("filename") or urlsplit(entry["url"]).path.rsplit("/", 1)[-1]
+    return f"{entry['dest'].rstrip('/')}/{name}"
+
+
+def _entry_probe_path(entry: dict) -> str:
+    """What to measure to answer "is it already there?".
+
+    A plain download is one file, and that file is the answer -- measuring its
+    directory instead adds the 4096-byte inode and the size never equals the
+    remote Content-Length, so the entry reads `partial` forever. An archive's
+    dest holds a tarball before wire-in and an unpacked tree after, so there
+    the directory is the only thing meaningful across both."""
+    return entry["dest"] if entry.get("archive") else _entry_target(entry)
+
+
 def _download_catalogue() -> list[dict]:
     """The catalogue, re-read when the file changes.
 
@@ -5234,7 +5280,7 @@ async def darkhelix_downloads() -> JSONResponse:
         if entry:
             title, body = _download_card_text(item, entry)
             url_state, dest_state = await asyncio.gather(
-                _check_url(entry["url"]), _dest_state(entry["dest"]))
+                _check_url(entry["url"]), _dest_state(_entry_probe_path(entry)))
             row["entry"] = {"id": entry.get("id"), "name": entry.get("name"),
                             "url": entry["url"], "dest": entry["dest"],
                             "approx": entry.get("approx"),
@@ -5349,12 +5395,20 @@ async def darkhelix_download_run(request: Request) -> JSONResponse:
     log = f"{_DOWNLOAD_LOG_DIR}/{entry_id}.log"
     # One at a time per entry: a second wget onto the same partial file is how
     # you get a corrupt archive that checksums differently on every retry.
-    guard = (f"pgrep -af {shlex.quote(url)} >/dev/null && "
+    guard = (f"{_wget_running_probe(url)} && "
              "{ echo ALREADY_RUNNING; exit 0; }; ")
+    # The mkdir stays in the foreground so a failure is reported rather than
+    # lost, and ONLY the wget is backgrounded. Backgrounding the whole
+    # `mkdir && wget` list forked a subshell that kept the ssh channel's
+    # stdout/stderr pipes open for the life of the transfer, so asyncssh sat
+    # waiting on a 110 GB download and this endpoint never returned -- the
+    # exact thing the docstring above says it must not do. A lone background
+    # command is exec'd, so nothing is left holding the pipes.
     cmd = (
         guard +
-        f"mkdir -p {shlex.quote(_DOWNLOAD_LOG_DIR)} {shlex.quote(dest)} && "
-        f"nohup wget -c -P {shlex.quote(dest)} {shlex.quote(url)} "
+        f"mkdir -p {shlex.quote(_DOWNLOAD_LOG_DIR)} {shlex.quote(dest)} || "
+        "{ echo MKDIR_FAILED; exit 1; }; "
+        f"nohup wget -c -O {shlex.quote(_entry_target(entry))} {shlex.quote(url)} "
         f">> {shlex.quote(log)} 2>&1 < /dev/null & "
         "echo STARTED $!"
     )
@@ -5366,7 +5420,7 @@ async def darkhelix_download_run(request: Request) -> JSONResponse:
     started = text.startswith("STARTED")
     if task_id and started:
         note = (f"Download started on snarf: {url}\n"
-                f"-> {dest}\nlog: {log}\n"
+                f"-> {_entry_target(entry)}\nlog: {log}\n"
                 "Card stays `scheduled` until the bytes are down and the "
                 "wire-in step is done.")
         try:
@@ -5392,11 +5446,10 @@ async def darkhelix_download_progress(entry_id: str) -> JSONResponse:
         return JSONResponse({"ok": False, "error": "no such catalogue entry"},
                             status_code=400)
     log = f"{_DOWNLOAD_LOG_DIR}/{entry_id}.log"
-    q = shlex.quote(entry["url"])
     try:
         rc, out = await _fleet_ssh(
             "snarf",
-            f"pgrep -af {q} >/dev/null && echo RUNNING || echo IDLE; "
+            f"{_wget_running_probe(entry['url'])} && echo RUNNING || echo IDLE; "
             f"tail -c 1200 {shlex.quote(log)} 2>/dev/null | tr '\\r' '\\n' | tail -6")
     except Exception as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)

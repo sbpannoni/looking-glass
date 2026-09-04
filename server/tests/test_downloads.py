@@ -5,6 +5,8 @@ entirely in what the endpoint refuses to claim -- a URL it has not checked, a
 download that is already on disk, a card filed for either -- so those are the
 tests.
 """
+import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -149,3 +151,170 @@ def test_files_then_parks_the_card_so_it_cannot_take_the_seat(monkeypatch):
     # The park is a second call because `create` cannot open a card in
     # `scheduled`, and the card must never be left dispatchable in between.
     assert "kanban schedule t_74981c9f" in seen[1]
+
+
+# --- the "already running" guard --------------------------------------------
+#
+# The guard used to be `pgrep -af <url>`, and it matched the remote `bash -c`
+# that ssh was running it in -- the URL is in that shell's own argv, and pgrep
+# excludes its own pid but not its parent's. So every click reported "already
+# running on snarf" and no wget was ever reached. These tests run the probe
+# through a real shell against a process table that contains the calling shell,
+# because that is the only shape in which the bug is visible.
+
+FAKE_PGREP = r'''#!/usr/bin/env python3
+"""Enough of pgrep to tell the two probes apart: -f matches the pattern as a
+regex against the whole command line, plain matches the process name."""
+import os, re, sys
+args = sys.argv[1:]
+flags = "".join(a[1:] for a in args if a.startswith("-"))
+pattern = next((a for a in args if not a.startswith("-")), "")
+hits = []
+for line in os.environ.get("FAKE_PROCS", "").splitlines():
+    if not line.strip():
+        continue
+    pid, _, cmdline = line.partition(" ")
+    if "f" in flags:
+        ok = re.search(pattern, cmdline) is not None
+    else:
+        ok = os.path.basename(cmdline.split()[0]) == pattern
+    if ok:
+        hits.append(f"{pid} {cmdline}" if "a" in flags else pid)
+print("\n".join(hits))
+sys.exit(0 if hits else 1)
+'''
+
+ZENODO = "https://zenodo.org/records/14192463/files/DATABASES.tar.gz?download=1"
+
+
+@pytest.fixture
+def shell(tmp_path):
+    """Run a probe the way ssh does: in a `bash -c` whose argv holds the URL."""
+    import subprocess
+    fake = tmp_path / "pgrep"
+    fake.write_text(FAKE_PGREP)
+    fake.chmod(0o755)
+
+    def run(probe, *, wget_for=None):
+        procs = [f"31337 bash -c {probe}"]          # the shell asking the question
+        if wget_for:
+            procs.append(f"4242 wget -c -P /ssdpool/DARKHELIX/database/x {wget_for}")
+        env = dict(os.environ, PATH=f"{tmp_path}:{os.environ['PATH']}",
+                   FAKE_PROCS="\n".join(procs))
+        return subprocess.run(["bash", "-c", probe], env=env,
+                              capture_output=True).returncode == 0
+
+    return run
+
+
+def test_the_probe_ignores_the_shell_that_is_running_it(shell):
+    url = ENTRY["url"]
+    assert shell(srv._wget_running_probe(url)) is False
+    # The old form, for contrast: nothing is downloading and it still says yes.
+    assert shell(f"pgrep -af {shlex.quote(url)} >/dev/null") is True
+
+
+def test_the_probe_still_sees_a_real_wget(shell):
+    url = ENTRY["url"]
+    assert shell(srv._wget_running_probe(url), wget_for=url) is True
+
+
+def test_the_probe_matches_a_url_containing_regex_metacharacters(shell):
+    """Both Zenodo entries end in `?download=1`, and the old pattern was an
+    ERE: that `?` made the preceding `z` optional, so it matched neither the
+    shell nor the wget. The guard failed the other way round for those two --
+    never tripping, so nothing stopped a second wget onto the same partial
+    file. grep -F compares the URL as text and gets both cases right."""
+    assert shell(srv._wget_running_probe(ZENODO), wget_for=ZENODO) is True
+    assert shell(f"pgrep -af {shlex.quote(ZENODO)} >/dev/null",
+                 wget_for=ZENODO) is False
+
+
+def test_both_endpoints_ask_the_question_the_same_way(monkeypatch):
+    """run and progress drifting apart is how one of them regresses alone."""
+    seen = []
+
+    async def fake(host, cmd):
+        seen.append(cmd)
+        return 0, "STARTED 4242" if "wget" in cmd else "IDLE"
+
+    monkeypatch.setattr(srv, "_fleet_ssh", fake)
+    client.post("/api/darkhelix/downloads/run", json={"entry_id": "gtdbtk"})
+    client.get("/api/darkhelix/downloads/progress", params={"entry_id": "gtdbtk"})
+    probe = srv._wget_running_probe(ENTRY["url"])
+    assert [c for c in seen if probe in c] and all("pgrep -af" not in c for c in seen)
+
+
+# --- where the bytes actually land ------------------------------------------
+
+CONO = {"id": "conoserver-protein", "match": "ConoServer",
+        "name": "ConoServer conopeptide protein sequences",
+        "url": "https://www.conoserver.org/download/conoserver_protein.fa.gz",
+        "dest": "/ssdpool/DARKHELIX/database/conoserver"}
+
+
+def test_the_filename_comes_from_the_url_path(monkeypatch):
+    assert (srv._entry_target(CONO)
+            == "/ssdpool/DARKHELIX/database/conoserver/conoserver_protein.fa.gz")
+
+
+def test_a_query_string_never_reaches_the_filename():
+    """wget names a file from the whole URL. Verified on snarf: given
+    `...DATABASES.tar.gz?download=1` it writes that literally, query and all,
+    and the wire-in step then cannot find what it is looking for."""
+    e = {"url": ZENODO, "dest": "/ssdpool/DARKHELIX/database/pathofact"}
+    assert srv._entry_target(e) == "/ssdpool/DARKHELIX/database/pathofact/DATABASES.tar.gz"
+
+
+def test_an_explicit_filename_wins_over_the_url():
+    e = dict(CONO, filename="conopeptides.fa.gz")
+    assert srv._entry_target(e).endswith("/conopeptides.fa.gz")
+
+
+def test_a_plain_download_is_measured_as_a_file_not_a_directory():
+    """du -sb on the directory adds the 4096-byte inode, so the total never
+    equals Content-Length and the entry reads `partial` for ever."""
+    assert srv._entry_probe_path(CONO) == srv._entry_target(CONO)
+    archive = dict(CONO, archive="tar.gz")
+    assert srv._entry_probe_path(archive) == archive["dest"]
+
+
+# --- the endpoint must not own the transfer ---------------------------------
+
+def _shape(background_list: bool) -> str:
+    """The run command's shape, with a sleep standing in for wget."""
+    tail = "nohup sleep 5 >> /dev/null 2>&1 < /dev/null & echo STARTED $!"
+    return (f"mkdir -p /tmp && {tail}" if background_list
+            else f"mkdir -p /tmp || {{ echo MKDIR_FAILED; exit 1; }}; {tail}")
+
+
+def test_starting_a_download_does_not_hold_the_pipes_open():
+    """capture_output gives the child a pipe, exactly as ssh gives it a channel.
+    Backgrounding the whole `mkdir && wget` list forks a subshell that keeps
+    that pipe open for the life of the transfer -- which is how one click sat
+    in asyncssh for the duration of a 110 GB download."""
+    import subprocess
+    r = subprocess.run(["bash", "-c", _shape(background_list=False)],
+                       capture_output=True, timeout=3, text=True)
+    assert r.stdout.startswith("STARTED")
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        subprocess.run(["bash", "-c", _shape(background_list=True)],
+                       capture_output=True, timeout=3)
+
+
+def test_run_names_its_output_and_backgrounds_only_the_wget(monkeypatch):
+    seen = []
+
+    async def fake(host, cmd):
+        seen.append(cmd)
+        return 0, "STARTED 4242"
+
+    monkeypatch.setattr(srv, "_fleet_ssh", fake)
+    client.post("/api/darkhelix/downloads/run", json={"entry_id": "gtdbtk"})
+    cmd = seen[0]
+    assert f"-O {shlex.quote(srv._entry_target(ENTRY))}" in cmd
+    assert "-P " not in cmd
+    # The mkdir must not be welded to the wget by `&&`, or the whole list ends
+    # up in the background together.
+    assert "MKDIR_FAILED" in cmd and "&& nohup" not in cmd

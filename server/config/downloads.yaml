@@ -13,8 +13,13 @@
 #
 # Fields:
 #   match    case-insensitive substring matched against the TODO item's text
-#   dest     where it lands on snarf. Under /ssdpool/DARKHELIX/database/ is the
-#            shared pool -- see docs/PIPELINE-VERIFICATION.md on what that means
+#   dest     the DIRECTORY it lands in on snarf, never the file itself. Under
+#            /ssdpool/DARKHELIX/database/ is the shared pool -- see
+#            docs/PIPELINE-VERIFICATION.md on what that means
+#   filename optional, the name the file takes inside dest. Omit it and the
+#            name comes from the URL path, which is right for every entry here
+#            -- including the Zenodo ones, whose `?download=1` wget would
+#            otherwise write into the filename verbatim
 #   archive  set when the download is a tarball that has to be unpacked
 #   wire_in  what still has to be done after the bytes land. Downloads are
 #            rarely the whole job: most of these need an edit to conform to the
@@ -36,7 +41,7 @@ entries:
     match: "mash sketch DB"
     name: Mash RefSeq sketch (k21, s1000)
     url: https://gembox.cbcb.umd.edu/mash/refseq.genomes.k21s1000.msh
-    dest: /ssdpool/DARKHELIX/database/mash/refseq.genomes.k21s1000.msh
+    dest: /ssdpool/DARKHELIX/database/mash
     approx: ~700 MB
     wire_in: >-
       DoMashPrefilter takes the .msh path directly. The lane has never been
@@ -82,7 +87,7 @@ entries:
     match: "ConoServer / ConoDictor DB"
     name: ConoServer conopeptide protein sequences
     url: https://www.conoserver.org/download/conoserver_protein.fa.gz
-    dest: /ssdpool/DARKHELIX/database/conoserver/conoserver_protein.fa.gz
+    dest: /ssdpool/DARKHELIX/database/conoserver
     approx: 196 kB gzipped (the TODO's "~tens of MB" is wrong)
     wire_in: >-
       This is the ConoServer SEQUENCE set. ConoDictor's own HMM/PSSM models are
